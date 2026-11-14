@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="cs"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; font-src 'self' data:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Plugins</title>
+<link rel="stylesheet" href="../shared/base.css"><link rel="stylesheet" href="../shared/page.css"></head>
+<body><div class="page">
+  <div class="page-head"><h1 data-i18n="m_plugins"></h1><button class="btn primary" id="add" data-i18n="plugInstall"></button></div>
+  <div class="hint" data-i18n="plugHint" style="margin-bottom:12px"></div>
+  <div id="msg" class="hint"></div><div id="list"></div>
+</div>
+<script src="../shared/icons.js"></script><script src="../shared/bridge.js"></script><script src="../shared/i18n.js"></script>
+<script>
+(async () => {
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  await initPage();
+  let items = [];
+  const render = () => {
+    if (!items.length) { list.innerHTML = '<div class="empty">' + esc(t('plugEmpty')) + '</div>'; return; }
+    list.innerHTML = '<div class="card">' + items.map((p) =>
+      '<div class="list-item"><div style="flex:1;min-width:0"><div class="title">' + esc(p.name) + ' <span class="url">' + esc(p.version) + '</span>' +
+      (p.allSites ? ' <b style="color:#e5484d">' + esc(t('plugAllSites')) + '</b>' : '') + '</div>' +
+      '<div class="url">' + esc(p.description || '') + '</div><div class="url" style="opacity:.7">' + esc(p.matches.slice(0, 4).join('  ')) + (p.matches.length > 4 ? ' …' : '') + '</div></div>' +
+      '<button class="btn" data-a="toggle" data-id="' + esc(p.id) + '" data-on="' + (p.enabled ? 1 : 0) + '">' + esc(t(p.enabled ? 'plugDisable' : 'plugEnable')) + '</button>' +
+      '<button class="btn" data-a="remove" data-id="' + esc(p.id) + '">' + esc(t('plugRemove')) + '</button></div>').join('') + '</div>';
+  };
+  const load = async () => { items = await hb.call('plugins.list'); render(); };
+  add.onclick = async () => {
+    msg.textContent = '';
+    try { const r = await hb.call('plugins.install'); if (!r.ok && r.error) msg.textContent = t('plugError') + ': ' + r.error; } catch (e) { msg.textContent = t('plugError'); }
+    await load();
+  };
+  list.onclick = async (e) => {
+    const b = e.target.closest('button[data-a]'); if (!b) return;
+    if (b.dataset.a === 'toggle') await hb.call('plugins.enable', { id: b.dataset.id, enabled: b.dataset.on !== '1' });
+    else await hb.call('plugins.remove', { id: b.dataset.id });
+    await load();
+  };
+  await load();
+})();
+</script></body></html>

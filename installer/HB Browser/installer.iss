@@ -1,6 +1,6 @@
 
 #define MyAppName "HB Browser"
-#define MyAppVersion "2.5.2"
+#define MyAppVersion "3.1.0"
 #define MyAppPublisher "Homebax Studios"
 #define MyAppURL "https://homebax.vercel.app"
 #define MyAppExeName "HB Browser.exe"
@@ -47,7 +47,7 @@ RestartApplications=no
 Uninstallable=yes
 CreateUninstallRegKey=yes
 
-VersionInfoVersion=2.5.2.0
+VersionInfoVersion=3.1.0.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=HB Browser Installer
 VersionInfoProductName={#MyAppName}
