@@ -16,6 +16,7 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
@@ -84,35 +85,41 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
-        prefs = getSharedPreferences("hb", MODE_PRIVATE);
-        side = getResources().getConfiguration().orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
-        CookieManager.getInstance().setAcceptCookie(true);
-        if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true);   // desktop DevTools via chrome://inspect (debug builds only)
+        try {
+            prefs = getSharedPreferences("hb", MODE_PRIVATE);
+            side = getResources().getConfiguration().orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+            try {
+                CookieManager.getInstance().setAcceptCookie(true);
+                if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true);   // desktop DevTools via chrome://inspect (debug builds only)
+            } catch (Exception ignored) { }
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout bar = new LinearLayout(this);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.addView(btn("<", v -> { WebView w = cur(); if (w != null && w.canGoBack()) w.goBack(); }));
-        bar.addView(btn(">", v -> { WebView w = cur(); if (w != null && w.canGoForward()) w.goForward(); }));
-        bar.addView(btn("R", v -> { WebView w = cur(); if (w != null) w.reload(); }));
-        urlBar = new EditText(this);
-        urlBar.setSingleLine(true);
-        urlBar.setHint("Search or enter address");
-        urlBar.setImeOptions(EditorInfo.IME_ACTION_GO);
-        urlBar.setOnEditorActionListener((v, a, e) -> { go(urlBar.getText().toString()); hideKeyboard(); return true; });
-        bar.addView(urlBar, new LinearLayout.LayoutParams(0, -2, 1));
-        bar.addView(btn("Tabs", v -> showTabs()));
-        bar.addView(btn("...", v -> showMenu()));
-        content = new LinearLayout(this);
-        content.setOrientation(side ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-        root.addView(bar, new LinearLayout.LayoutParams(-1, -2));
-        root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
-        setContentView(root);
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout bar = new LinearLayout(this);
+            bar.setGravity(Gravity.CENTER_VERTICAL);
+            bar.addView(btn("<", v -> { WebView w = cur(); if (w != null && w.canGoBack()) w.goBack(); }));
+            bar.addView(btn(">", v -> { WebView w = cur(); if (w != null && w.canGoForward()) w.goForward(); }));
+            bar.addView(btn("R", v -> { WebView w = cur(); if (w != null) w.reload(); }));
+            urlBar = new EditText(this);
+            urlBar.setSingleLine(true);
+            urlBar.setHint("Search or enter address");
+            urlBar.setImeOptions(EditorInfo.IME_ACTION_GO);
+            urlBar.setOnEditorActionListener((v, a, e) -> { go(urlBar.getText().toString()); hideKeyboard(); return true; });
+            bar.addView(urlBar, new LinearLayout.LayoutParams(0, -2, 1));
+            bar.addView(btn("Tabs", v -> showTabs()));
+            bar.addView(btn("...", v -> showMenu()));
+            content = new LinearLayout(this);
+            content.setOrientation(side ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+            root.addView(bar, new LinearLayout.LayoutParams(-1, -2));
+            root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
+            setContentView(root);
 
-        Uri data = getIntent() != null ? getIntent().getData() : null;
-        newTab(data != null ? data.toString() : "");
-        checkUpdate();
+            Uri data = getIntent() != null ? getIntent().getData() : null;
+            newTab(data != null ? data.toString() : "");
+            checkUpdate();
+        } catch (Exception e) {
+            Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     Button btn(String t, View.OnClickListener l) {
@@ -200,15 +207,23 @@ public class MainActivity extends Activity {
         content.setOrientation(side ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
         if (second >= 0 && second < tabs.size() && second != first) {
             float r = Math.max(0.2f, Math.min(0.8f, ratio));
-            content.addView(tabs.get(first), new LinearLayout.LayoutParams(side ? 0 : -1, side ? -1 : 0, r));
+            WebView w1 = tabs.get(first);
+            WebView w2 = tabs.get(second);
+            if (w1.getParent() != null) ((ViewGroup) w1.getParent()).removeView(w1);
+            if (w2.getParent() != null) ((ViewGroup) w2.getParent()).removeView(w2);
+            content.addView(w1, new LinearLayout.LayoutParams(side ? 0 : -1, side ? -1 : 0, r));
             View gap = new View(this);
             gap.setBackgroundColor(0xFF4F7CFF);
             content.addView(gap, new LinearLayout.LayoutParams(side ? 4 : -1, side ? -1 : 4));
-            content.addView(tabs.get(second), new LinearLayout.LayoutParams(side ? 0 : -1, side ? -1 : 0, 1 - r));
+            content.addView(w2, new LinearLayout.LayoutParams(side ? 0 : -1, side ? -1 : 0, 1 - r));
         } else {
             second = -1;
             first = focus = Math.min(focus, tabs.size() - 1);
-            content.addView(tabs.get(first), new LinearLayout.LayoutParams(-1, -1));
+            if (first >= 0 && first < tabs.size()) {
+                WebView w = tabs.get(first);
+                if (w.getParent() != null) ((ViewGroup) w.getParent()).removeView(w);
+                content.addView(w, new LinearLayout.LayoutParams(-1, -1));
+            }
         }
         syncUrl();
     }
@@ -277,7 +292,10 @@ public class MainActivity extends Activity {
         s.setGeolocationEnabled(false);
         s.setBuiltInZoomControls(true);
         s.setDisplayZoomControls(false);
-        if (Build.VERSION.SDK_INT >= 26) { s.setSafeBrowsingEnabled(true); w.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_YES); }
+        if (Build.VERSION.SDK_INT >= 26) {
+            try { s.setSafeBrowsingEnabled(true); } catch (Exception ignored) { }
+            w.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_YES);
+        }
         CookieManager.getInstance().setAcceptThirdPartyCookies(w, false);
         w.setOnTouchListener((v, e) -> {
             if (e.getAction() == MotionEvent.ACTION_DOWN) { int i = tabs.indexOf(v); if (i >= 0 && i != focus && (i == first || i == second)) { focus = i; syncUrl(); } }
@@ -598,7 +616,11 @@ public class MainActivity extends Activity {
                     JSONObject j = new JSONObject(o.toString("UTF-8"));
                     String site = j.optString("update-site", "");
                     if (!updateShown && cmp(j.optString("version", "0"), VERSION) > 0 && site.startsWith("https://") && site.length() < 2048)
-                        runOnUiThread(() -> { updateShown = true; newTab(site); });
+                        runOnUiThread(() -> {
+                            if (isFinishing() || isDestroyed()) return;
+                            updateShown = true;
+                            newTab(site);
+                        });
                 }
             } catch (Exception ignored) { }
         }).start();

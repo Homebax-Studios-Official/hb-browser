@@ -1,6 +1,19 @@
+import java.io.FileInputStream
+import java.util.Properties
 
 plugins {
     id("com.android.application")
+}
+
+val keystorePropertiesFile = sequenceOf(
+    rootProject.file("keystore.properties"),
+    file("keystore.properties")
+).firstOrNull { it.exists() }
+
+val keystoreProperties = Properties().apply {
+    if ((keystorePropertiesFile != null) && keystorePropertiesFile.exists()) {
+        load(FileInputStream(keystorePropertiesFile))
+    }
 }
 
 android {
@@ -20,10 +33,25 @@ android {
         }
     }
 
+    signingConfigs {
+        if (keystorePropertiesFile != null && keystorePropertiesFile.exists()) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+
+            if (keystorePropertiesFile != null && keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
 
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
