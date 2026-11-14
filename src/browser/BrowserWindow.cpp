@@ -2,10 +2,12 @@
 
 #include <dwmapi.h>
 #include <tlhelp32.h>
+#include <cmath>
 #include <algorithm>
 #include <windowsx.h>
 
 #include "app/BrowserController.h"
+#include "core/SplitLayout.h"
 #include "../../platform/windows/WinUtil.h"
 
 namespace hb {
@@ -13,6 +15,7 @@ namespace hb {
 namespace {
 
 constexpr UINT_PTR kTimerDock = 9;
+constexpr UINT_PTR kTimerSpinner = 21;
 
 DWORD ParentPidOf(DWORD pid)
 {
@@ -91,6 +94,9 @@ bool BrowserWindow::Create(int showCommand)
     uiHost_ = CreateWindowExW(0, kHostClass, L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                               0, 0, 100, 100, hwnd_, nullptr, instance_, nullptr);
     if (!contentHost_ || !uiHost_) return false;
+    SetWindowLongPtrW(contentHost_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    SetWindowLongPtrW(uiHost_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    SetTimer(contentHost_, kTimerSpinner, 90, nullptr);  // tiny loading ring until the first view is there
 
     const MARGINS margins{1, 1, 1, 1};  // keeps the drop shadow and rounded corners of the borderless frame
     DwmExtendFrameIntoClientArea(hwnd_, &margins);
@@ -112,9 +118,10 @@ void BrowserWindow::Layout()
     RECT rc{};
     GetClientRect(hwnd_, &rc);
     const int inset = (fullscreen_ || IsZoomed(hwnd_)) ? 0 : Scaled(kBorder);
-    const int x = inset, y = inset;
+    const int topInset = (fullscreen_ || IsZoomed(hwnd_)) ? 0 : 1;  // the tab strip reaches the very top edge
+    const int x = inset, y = topInset;
     const int w = std::max(0, static_cast<int>(rc.right) - 2 * inset);
-    const int h = std::max(0, static_cast<int>(rc.bottom) - 2 * inset);
+    const int h = std::max(0, static_cast<int>(rc.bottom) - topInset - inset);
     const int shellH = fullscreen_ ? 0 : std::min(h, Scaled(shellCss_));
 
     const int dockW = (dock_ && !fullscreen_) ? std::clamp(w * 2 / 5, std::min(w / 2, 360), w / 2) : 0;
@@ -232,6 +239,9 @@ void BrowserWindow::SetTheme(bool dark, COLORREF frameColor)
 {
     if (background_) DeleteObject(background_);
     background_ = CreateSolidBrush(frameColor);
+    bgColor_ = frameColor;
+    if (contentHost_) InvalidateRect(contentHost_, nullptr, TRUE);
+    if (uiHost_) InvalidateRect(uiHost_, nullptr, TRUE);
     win::SetDarkTitleBar(hwnd_, dark, frameColor);
     InvalidateRect(hwnd_, nullptr, TRUE);
 }
@@ -276,8 +286,135 @@ void BrowserWindow::GetPlacement(int& x, int& y, int& w, int& h, bool& maximized
 
 LRESULT CALLBACK BrowserWindow::HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (msg == WM_ERASEBKGND) return 1;  // WebView2 paints everything
+    auto* self = reinterpret_cast<BrowserWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!self) return msg == WM_ERASEBKGND ? 1 : DefWindowProcW(hwnd, msg, wp, lp);
+    const bool content = hwnd == self->contentHost_;
+    switch (msg)
+    {
+    case WM_ERASEBKGND:
+    {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wp), &rc, self->background_);  // no garbage / white between the views
+        return 1;
+    }
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(dc, &rc, self->background_);
+        if (content && self->loading_) self->PaintSpinner(dc, rc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_TIMER:
+        if (content && wp == kTimerSpinner)
+        {
+            if (++self->spinnerPhase_ > 170) self->SetLoading(false);  // safety: never spin forever
+            else InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        break;
+    case WM_SETCURSOR:
+        if (content && LOWORD(lp) == HTCLIENT)
+        {
+            POINT p{};
+            GetCursorPos(&p);
+            ScreenToClient(hwnd, &p);
+            if (self->splitDrag_ || self->OverSplitter(p))
+            {
+                SetCursor(LoadCursorW(nullptr, self->splitSide_ ? IDC_SIZEWE : IDC_SIZENS));
+                return TRUE;
+            }
+        }
+        break;
+    case WM_LBUTTONDOWN:
+        if (content && self->OverSplitter(POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}))
+        {
+            self->splitDrag_ = true;
+            SetCapture(hwnd);
+            return 0;
+        }
+        break;
+    case WM_MOUSEMOVE:
+        if (content && self->splitDrag_)
+        {
+            self->DragSplitter(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            return 0;
+        }
+        break;
+    case WM_LBUTTONUP:
+    case WM_CAPTURECHANGED:
+        if (self->splitDrag_)
+        {
+            self->splitDrag_ = false;
+            if (msg == WM_LBUTTONUP) ReleaseCapture();
+            return 0;
+        }
+        break;
+    }
     return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void BrowserWindow::SetLoading(bool on)
+{
+    if (loading_ == on) return;
+    loading_ = on;
+    if (!on) KillTimer(contentHost_, kTimerSpinner);
+    InvalidateRect(contentHost_, nullptr, TRUE);
+}
+
+void BrowserWindow::PaintSpinner(HDC dc, const RECT& rc)
+{
+    const int cx = (rc.left + rc.right) / 2, cy = (rc.top + rc.bottom) / 2;
+    const double radius = 14.0 * scale_;
+    const int dot = static_cast<int>(3.4 * scale_) + 1;
+    const int br = GetRValue(bgColor_), bg = GetGValue(bgColor_), bb = GetBValue(bgColor_);
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    for (int i = 0; i < 8; ++i)
+    {
+        const double a = (i * 45.0 - 90.0) * 3.14159265358979 / 180.0;
+        const int age = ((spinnerPhase_ % 8) - i + 8) % 8;  // 0 = newest (brightest)
+        const double t = 1.0 - age / 8.0;                    // 1 .. 0.125
+        const COLORREF col = RGB(static_cast<int>(br + (79 - br) * t), static_cast<int>(bg + (124 - bg) * t), static_cast<int>(bb + (255 - bb) * t));
+        HBRUSH brush = CreateSolidBrush(col);
+        HGDIOBJ oldBrush = SelectObject(dc, brush);
+        const int x = cx + static_cast<int>(std::lround(std::cos(a) * radius)), y = cy + static_cast<int>(std::lround(std::sin(a) * radius));
+        Ellipse(dc, x - dot, y - dot, x + dot + 1, y + dot + 1);
+        SelectObject(dc, oldBrush);
+        DeleteObject(brush);
+    }
+    SelectObject(dc, oldPen);
+}
+
+void BrowserWindow::SetSplitState(bool active, bool sideBySide, double ratio)
+{
+    splitActive_ = active;
+    splitSide_ = sideBySide;
+    splitRatio_ = ClampSplitRatio(ratio);
+}
+
+bool BrowserWindow::OverSplitter(POINT p) const
+{
+    if (!splitActive_) return false;
+    RECT rc{};
+    GetClientRect(contentHost_, &rc);
+    const SplitResult r = ComputeSplit({0, 0, rc.right, rc.bottom}, splitRatio_, splitSide_, SplitGapPx());
+    return splitSide_ ? (p.x >= r.first.w && p.x < r.second.x) : (p.y >= r.first.h && p.y < r.second.y);
+}
+
+void BrowserWindow::DragSplitter(int x, int y)
+{
+    RECT rc{};
+    GetClientRect(contentHost_, &rc);
+    const double gap = SplitGapPx();
+    const double total = (splitSide_ ? rc.right : rc.bottom) - gap;
+    if (total <= 0 || !controller_) return;
+    const double pos = (splitSide_ ? x : y) - gap / 2.0;
+    splitRatio_ = ClampSplitRatio(pos / total);
+    controller_->OnSplitRatio(splitRatio_);
 }
 
 LRESULT CALLBACK BrowserWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -318,9 +455,9 @@ LRESULT BrowserWindow::OnMessage(UINT msg, WPARAM wp, LPARAM lp)
         RECT wr{};
         GetWindowRect(hwnd_, &wr);
         const int b = Scaled(kBorder);
-        const bool l = pt.x < wr.left + b, r = pt.x >= wr.right - b, t = pt.y < wr.top + b, bt = pt.y >= wr.bottom - b;
-        if (t && l) return HTTOPLEFT;
-        if (t && r) return HTTOPRIGHT;
+        const bool l = pt.x < wr.left + b, r = pt.x >= wr.right - b, t = pt.y < wr.top + 1, tc = pt.y < wr.top + b, bt = pt.y >= wr.bottom - b;
+        if (tc && l) return HTTOPLEFT;
+        if (tc && r) return HTTOPRIGHT;
         if (bt && l) return HTBOTTOMLEFT;
         if (bt && r) return HTBOTTOMRIGHT;
         if (l) return HTLEFT;

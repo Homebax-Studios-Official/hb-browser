@@ -106,7 +106,9 @@ public:
 
     void SetContentBounds(const RECT& r);
     // Split view: the active tab fills the first pane, `secondId` the second (0 = no split).
-    void SetSplit(int secondId, double ratio, bool sideBySide);
+    void SetSplit(int secondId, double ratio, bool sideBySide, int gapPx);
+    // Colour shown by a page before it paints (prevents a white flash in dark theme).
+    void SetContentBackground(COLORREF color);
     // Plugin scripts are injected into every page at document start (they match the address themselves).
     void SetPluginScripts(std::vector<std::wstring> scripts);
     // Turns "session" cookies of secure sites into 30-day cookies so logins survive a restart.
@@ -138,6 +140,9 @@ private:
     void ApplyPlugins(int id);
     int splitId_ = 0;
     double splitRatio_ = 0.5;
+    int splitGap_ = 8;
+    COLORREF contentBackground_ = RGB(255, 255, 255);
+    void ApplyContentBackground(View& v);
     bool splitSide_ = true;
     std::vector<std::wstring> pluginScripts_;
 

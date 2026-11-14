@@ -5,7 +5,11 @@
 #include <webkit2/webkit2.h>
 
 #include <algorithm>
+#include <sys/utsname.h>
+
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <functional>
 #include <memory>
 #include <string>
@@ -13,11 +17,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include "core/DevLog.h"
 #include "core/Navigation.h"
 #include "core/Plugins.h"
 #include "core/Security.h"
 #include "core/Settings.h"
 #include "core/Storage.h"
+#include <sqlite3.h>
 #include "core/Util.h"
 
 #define HB_VERSION "3.1.0"
@@ -44,6 +50,8 @@ static struct
     gint64 lastCookieSync = 0;
     bool updateShown = false;
     fs::path dir;
+    DevLog dev;
+    bool firstLoadDone = false;
 } A;
 
 static Tab* NewTab(const std::string& input, bool activate);
@@ -58,8 +66,23 @@ static Tab* Current()
 
 static std::string Engine() { return A.settings->Get<std::string>("searchEngine"); }
 
+static std::string NewTabTarget()
+{
+    if (A.settings->Get<std::string>("newTabMode") == "custom")
+    {
+        const std::string u = A.settings->Get<std::string>("newTabUrl");
+        if (!u.empty() && IsSafeTabUrl(u)) return u;
+    }
+    return {};
+}
+
 static void Load(Tab* t, const std::string& input)
 {
+    if (input.empty() && !NewTabTarget().empty())
+    {
+        webkit_web_view_load_uri(t->view, NewTabTarget().c_str());
+        return;
+    }
     if (input.empty())
     {
         const std::string tmpl = SearchUrl(Engine(), "\x01");
@@ -236,7 +259,16 @@ static void OnUri(WebKitWebView* v, GParamSpec*, gpointer)
 
 static void OnLoad(WebKitWebView* v, WebKitLoadEvent e, gpointer)
 {
+    if (e == WEBKIT_LOAD_STARTED) { g_object_set_data(G_OBJECT(v), "hb-t0", GINT_TO_POINTER(static_cast<int>(A.dev.NowMs() % 2000000000LL))); return; }
     if (e != WEBKIT_LOAD_FINISHED) return;
+    if (void* t0 = g_object_get_data(G_OBJECT(v), "hb-t0"))
+    {
+        const char* u = webkit_web_view_get_uri(v);
+        const std::string host = u ? (std::string(u) == "about:blank" ? std::string("about:blank") : HostOf(u)) : std::string("?");
+        A.dev.Timing("page " + host, static_cast<long long>(A.dev.NowMs() % 2000000000LL) - GPOINTER_TO_INT(t0));
+        g_object_set_data(G_OBJECT(v), "hb-t0", nullptr);
+    }
+    if (!A.firstLoadDone) { A.firstLoadDone = true; A.dev.Mark("first page loaded"); A.dev.WriteHints(); }
     const char* uri = webkit_web_view_get_uri(v);
     if (uri && StartsWith(uri, "http"))
     {
@@ -423,6 +455,77 @@ static gboolean OnKey(GtkWidget*, GdkEventKey* e, gpointer)
     return FALSE;
 }
 
+static std::string FileLine(const char* path, const char* key)
+{
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line))
+        if (line.rfind(key, 0) == 0) { const auto c = line.find(':'); return c == std::string::npos ? line : Trim(line.substr(c + 1)); }
+    return "?";
+}
+
+static std::string Esc(const std::string& s)
+{
+    std::string o;
+    for (char c : s) o += c == '<' ? "&lt;" : c == '>' ? "&gt;" : c == '&' ? "&amp;" : std::string(1, c);
+    return o;
+}
+
+// Developer page: system information, versions, web engines and what slows the start (same data as dev.log).
+static void ShowDevInfo()
+{
+    struct utsname un{};
+    uname(&un);
+    std::ostringstream h;
+    auto row = [&](const std::string& k, const std::string& v) { h << "<tr><td class=k>" << Esc(k) << "</td><td>" << Esc(v) << "</td></tr>"; };
+    h << "<meta charset=utf-8><title>Developer info</title><style>body{font:14px system-ui;background:#14161c;color:#e8eaf0;padding:24px}"
+         "td{padding:3px 16px 3px 0;vertical-align:top}.k{opacity:.6;white-space:nowrap}h3{margin:20px 0 6px}</style><h2>Developer info</h2>";
+    h << "<h3>What slows the start</h3><table>";
+    for (const auto& x : A.dev.Hints()) h << "<tr><td>- " << Esc(x) << "</td></tr>";
+    h << "</table><h3>Startup steps</h3><table>";
+    for (const auto& e : A.dev.Entries()) row(e.text, std::to_string(e.atMs) + " ms (+" + std::to_string(e.deltaMs) + ")");
+    h << "</table><h3>System</h3><table>";
+    char* os = g_get_os_info(G_OS_INFO_KEY_PRETTY_NAME);
+    row("OS", os ? os : "Linux"); g_free(os);
+    row("Kernel", std::string(un.release) + " " + un.machine);
+    row("CPU", FileLine("/proc/cpuinfo", "model name"));
+    row("Logical cores", std::to_string(g_get_num_processors()));
+    row("RAM total", FileLine("/proc/meminfo", "MemTotal"));
+    row("RAM available", FileLine("/proc/meminfo", "MemAvailable"));
+    const char* session = g_getenv("XDG_SESSION_TYPE");
+    row("Display server", session ? session : "?");
+    row("Data folder", A.dir.string());
+    h << "</table><h3>SDK / library versions</h3><table>";
+    row("HB Browser", HB_VERSION);
+    row("GTK", std::to_string(gtk_get_major_version()) + "." + std::to_string(gtk_get_minor_version()) + "." + std::to_string(gtk_get_micro_version()));
+    row("WebKitGTK", std::to_string(webkit_get_major_version()) + "." + std::to_string(webkit_get_minor_version()) + "." + std::to_string(webkit_get_micro_version()));
+    row("libsoup", std::to_string(soup_get_major_version()) + "." + std::to_string(soup_get_minor_version()) + "." + std::to_string(soup_get_micro_version()));
+    row("SQLite", sqlite3_libversion());
+    h << "</table><h3>Web engines</h3><table>";
+    row("WebKitGTK (this Linux client)", "installed " + std::to_string(webkit_get_major_version()) + "." + std::to_string(webkit_get_minor_version()));
+    row("WebView2 (Windows client)", "n/a on Linux");
+    row("Android System WebView (Android client)", "n/a on Linux");
+    h << "</table><p style='opacity:.6'>Graphics API support (OpenGL / Vulkan) depends on the driver; check with glxinfo / vulkaninfo.</p>";
+    Tab* t = NewTab("about:blank", true);
+    webkit_web_view_load_html(t->view, h.str().c_str(), "about:blank");
+}
+
+static void NewTabDialog()
+{
+    GtkWidget* d = gtk_dialog_new_with_buttons("New tab page", GTK_WINDOW(A.win), GTK_DIALOG_MODAL, "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_OK, nullptr);
+    GtkWidget* e = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(e), "empty = HB new tab page, or https://example.com");
+    gtk_entry_set_text(GTK_ENTRY(e), A.settings->Get<std::string>("newTabUrl").c_str());
+    gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(d))), e, TRUE, TRUE, 8);
+    gtk_widget_show_all(d);
+    if (gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_OK)
+    {
+        const std::string u = Trim(gtk_entry_get_text(GTK_ENTRY(e)));
+        if (A.settings->Set("newTabUrl", u)) { A.settings->Set("newTabMode", u.empty() ? "default" : "custom"); A.settings->Save(); }
+    }
+    gtk_widget_destroy(d);
+}
+
 static void BuildUi()
 {
     A.win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -467,6 +570,8 @@ static void BuildUi()
         Tab* t = NewTab("about:blank", true);
         webkit_web_view_load_html(t->view, html.c_str(), "about:blank");
     });
+    AddItem(menu, "New tab page...", NewTabDialog);
+    AddItem(menu, "Developer info (system, versions, startup)", ShowDevInfo);
     AddItem(menu, "Quit", [] { gtk_main_quit(); });
     gtk_widget_show_all(menu);
     GtkWidget* mb = gtk_menu_button_new();
@@ -491,6 +596,8 @@ int main(int argc, char** argv)
 {
     gtk_init(&argc, &argv);
     A.dir = fs::path(g_get_user_data_dir()) / "hb-browser";
+    A.dev.Open(A.dir / "dev.log", 0);
+    A.dev.Mark("controller start");
     std::error_code ec;
     fs::create_directories(A.dir, ec);
     fs::permissions(A.dir, fs::perms::owner_all, fs::perm_options::replace, ec);  // private to this user
@@ -504,13 +611,16 @@ int main(int argc, char** argv)
     webkit_website_data_manager_set_itp_enabled(dm, TRUE);
     WebKitCookieManager* cm = webkit_website_data_manager_get_cookie_manager(dm);
     webkit_cookie_manager_set_persistent_storage(cm, (A.dir / "cookies.sqlite").c_str(), WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
+    A.dev.Mark("engine requested");
     A.ctx = webkit_web_context_new_with_website_data_manager(dm);
+    A.dev.Mark("engine ready");
     A.ucm = webkit_user_content_manager_new();
     g_signal_connect(A.ctx, "download-started", G_CALLBACK(OnDownloadStarted), nullptr);
     ReloadPlugins();
 
     BuildUi();
     gtk_widget_show_all(A.win);
+    A.dev.Mark("browser UI ready");
     if (argc > 1) for (int i = 1; i < argc && i < 20; ++i) NewTab(argv[i], true);
     else NewTab("", true);
     CheckUpdate();

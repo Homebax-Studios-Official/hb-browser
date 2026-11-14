@@ -16,7 +16,10 @@ json Settings::Defaults()
         {"language", "auto"},           // auto | cs | en
         {"searchEngine", "google"},
         {"homepage", "hb://newtab"},
-        {"startup", "restore"},         // newtab | home | restore
+        {"startup", "newtab"},          // newtab | home  (the last session is never restored automatically)
+        {"newTabMode", "default"},      // default = HB new tab page | custom = newTabUrl
+        {"newTabUrl", ""},
+        {"devLog", true},
         {"showHomeButton", true},
         {"showBookmarksBar", true},
         {"singleInstance", true},
@@ -97,7 +100,14 @@ bool Settings::IsValid(const std::string& key, const json& v)
 {
     if (key == "theme") return OneOf(v, {"system", "light", "dark"});
     if (key == "language") return OneOf(v, {"auto", "cs", "en"});
-    if (key == "startup") return OneOf(v, {"newtab", "home", "restore"});
+    if (key == "startup") return OneOf(v, {"newtab", "home"});
+    if (key == "newTabMode") return OneOf(v, {"default", "custom"});
+    if (key == "newTabUrl")
+    {
+        if (!PlainText(v, 2048, true)) return false;
+        const std::string u = v.get<std::string>();
+        return u.empty() || ((SchemeOf(u) == "http" || SchemeOf(u) == "https") && IsSafeTabUrl(u));
+    }
     if (key == "trackingPrevention") return OneOf(v, {"off", "basic", "balanced", "strict"});
     if (key == "accent")
     {

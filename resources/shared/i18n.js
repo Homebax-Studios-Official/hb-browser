@@ -41,6 +41,7 @@
         // one native round trip: settings + info + translations (+ top sites)
         const r = await hb.call('page.init', { top });
         useDict(r.dict, r.lang); applyI18n();
+        if (!window.__hbReadyLogged && window.hb) { window.__hbReadyLogged = 1; hb.call('dev.perf', { page: location.pathname.split('/').pop(), ready: Math.round(performance.now()) }).catch(() => {}); }
         applyTheme(r.info.dark, r.settings.accent);
         hydrateIcons();
         return { settings: r.settings, info: r.info, top: r.top || [] };

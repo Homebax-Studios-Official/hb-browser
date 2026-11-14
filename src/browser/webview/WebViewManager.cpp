@@ -160,6 +160,7 @@ void WebViewManager::CreateTab(int id, const std::wstring& url, bool isPrivate, 
         View& view = views_[id] = std::move(v);
 
         SetupCommon(id, view, false);
+        ApplyContentBackground(view);
         ApplyLayout();
         ApplyPlugins(id);
 
@@ -542,7 +543,7 @@ void WebViewManager::ApplyLayout()
     SplitResult sr;
     if (split)
         sr = ComputeSplit({contentBounds_.left, contentBounds_.top, contentBounds_.right - contentBounds_.left,
-                           contentBounds_.bottom - contentBounds_.top}, splitRatio_, splitSide_, 6);
+                           contentBounds_.bottom - contentBounds_.top}, splitRatio_, splitSide_, splitGap_);
     auto toRect = [](const SplitRect& r) { return RECT{r.x, r.y, r.x + r.w, r.y + r.h}; };
     for (auto& [vid, v] : views_)
     {
@@ -556,8 +557,21 @@ void WebViewManager::ApplyLayout()
     }
 }
 
-void WebViewManager::SetSplit(int secondId, double ratio, bool sideBySide)
+void WebViewManager::ApplyContentBackground(View& v)
 {
+    if (auto c2 = v.controller.try_query<ICoreWebView2Controller2>())
+        c2->put_DefaultBackgroundColor(COREWEBVIEW2_COLOR{255, GetRValue(contentBackground_), GetGValue(contentBackground_), GetBValue(contentBackground_)});
+}
+
+void WebViewManager::SetContentBackground(COLORREF color)
+{
+    contentBackground_ = color;
+    for (auto& [id, v] : views_) ApplyContentBackground(v);
+}
+
+void WebViewManager::SetSplit(int secondId, double ratio, bool sideBySide, int gapPx)
+{
+    splitGap_ = std::max(2, gapPx);
     splitId_ = secondId;
     splitRatio_ = ClampSplitRatio(ratio);
     splitSide_ = sideBySide;

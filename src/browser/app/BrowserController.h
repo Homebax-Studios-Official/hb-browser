@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "../BrowserWindow.h"
+#include "../core/DevLog.h"
 #include "../core/Plugins.h"
 #include "../core/Settings.h"
 #include "../core/Storage.h"
@@ -64,6 +65,7 @@ public:
     bool OnAccelerator(int tabId, UINT vk, bool repeat) override;
     void OnDownloadStarting(int tabId, ICoreWebView2DownloadOperation* op, ICoreWebView2DownloadStartingEventArgs* args) override;
     void OnProcessFailed(int tabId, bool renderCrashed) override;
+    void OnSplitRatio(double ratio);   // divider dragged with the mouse
     void OnPermissionRequested(int tabId, const std::string& origin, int kind, bool userInitiated,
                                wil::com_ptr<ICoreWebView2PermissionRequestedEventArgs> args,
                                wil::com_ptr<ICoreWebView2Deferral> deferral) override;
@@ -119,6 +121,15 @@ private:
     void StartUpdateCheck(int tabId, const std::string& id, bool startup);
     nlohmann::json BuildInfo();
     void ReloadPlugins();
+    void MarkStep(const char* what);
+    int RestoreSession();
+    void OfferRestore();
+    std::string NewTabTarget();
+    void ApplySplit(int second);
+    void TearTab(int id, int x, int y);
+    nlohmann::json DevInfo();
+    void LogSystemInfo();
+    std::string NavLabel(const std::string& url);
     nlohmann::json Dictionary(const std::string& lang);
     std::filesystem::path DownloadDir() const;
     std::string SecurityOf(const Tab& t) const;
@@ -137,6 +148,10 @@ private:
     bool uiReady_ = false;
     bool updateSiteShown_ = false;
     std::vector<Plugin> plugins_;
+    DevLog dev_;
+    std::map<int, long long> navStart_;
+    bool crashed_ = false;       // the previous run did not exit normally
+    int startupBlank_ = 0;       // new-tab page opened at start (replaced when a session is restored)
     int splitId_ = 0;            // second pane of the split view (0 = none)
     double splitRatio_ = 0.5;
     bool splitSide_ = true;

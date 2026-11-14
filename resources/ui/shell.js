@@ -101,31 +101,47 @@
     const id = +tabEl.dataset.id;
     closePopups(null, true);
     if (id !== state.activeId) post('activateTab', { id });
-    drag = { id, el: tabEl, startX: e.clientX, moved: false, rects: [...el.tabs.children].map((c) => c.getBoundingClientRect()) };
+    const els = [...el.tabs.children];
+    const idx = els.indexOf(tabEl);
+    drag = { id, el: tabEl, idx, target: idx, startX: e.clientX, startY: e.clientY, moved: false, tear: false, rects: els.map((c) => c.getBoundingClientRect()) };
     tabEl.setPointerCapture(e.pointerId);
   });
   el.tabs.addEventListener('pointermove', (e) => {
     if (!drag) return;
-    const dx = e.clientX - drag.startX;
-    if (!drag.moved && Math.abs(dx) < 6) return;
+    const dx = e.clientX - drag.startX, dy = e.clientY - drag.startY;
+    if (!drag.moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
     drag.moved = true; dragging = true;
-    drag.el.style.transform = 'translateX(' + dx + 'px)'; drag.el.style.zIndex = 5;
+    drag.tear = Math.abs(dy) > 46 && state.tabs.length > 1;       // pulled away from the strip: becomes a new window
+    el.tabs.style.overflow = 'visible';
+    drag.el.style.transition = 'none'; drag.el.style.zIndex = 5; drag.el.style.opacity = drag.tear ? '.7' : '';
+    drag.el.style.transform = drag.tear ? 'translate(' + dx + 'px,' + dy + 'px) scale(.96)' : 'translateX(' + dx + 'px)';
+    const me = drag.rects[drag.idx], center = me.left + me.width / 2 + dx;
+    let target = 0;
+    drag.rects.forEach((r, i) => { if (i !== drag.idx && r.left + r.width / 2 < center) target++; });
+    if (drag.tear) target = drag.idx;
+    drag.target = target;
+    [...el.tabs.children].forEach((c, i) => {                     // neighbours slide aside to show where it will land
+      if (c === drag.el) return;
+      let shift = 0;
+      if (target > drag.idx && i > drag.idx && i <= target) shift = -(me.width + 2);
+      else if (target < drag.idx && i >= target && i < drag.idx) shift = me.width + 2;
+      c.style.transition = 'transform .12s'; c.style.transform = shift ? 'translateX(' + shift + 'px)' : '';
+    });
   });
-  el.tabs.addEventListener('pointerup', (e) => {
+  const endDrag = (e, cancel) => {
     if (!drag) return;
     const d = drag; drag = null;
-    if (d.moved) {
-      const dx = e.clientX - d.startX;
-      const myIndex = [...el.tabs.children].indexOf(d.el);
-      const center = d.rects[myIndex].left + d.rects[myIndex].width / 2 + dx;
-      let index = 0;
-      d.rects.forEach((r, i) => { if (i !== myIndex && r.left + r.width / 2 < center) index++; });
-      post('moveTab', { id: d.id, index });
+    [...el.tabs.children].forEach((c) => { c.style.transition = ''; c.style.transform = ''; });
+    d.el.style.zIndex = ''; d.el.style.opacity = ''; el.tabs.style.overflow = '';
+    if (d.moved && !cancel) {
+      if (d.tear) post('tearTab', { id: d.id, x: Math.round(e.screenX * (window.devicePixelRatio || 1)), y: Math.round(e.screenY * (window.devicePixelRatio || 1)) });
+      else if (d.target !== d.idx) post('moveTab', { id: d.id, index: d.target });
     }
-    d.el.style.transform = ''; d.el.style.zIndex = '';
     dragging = false;
     if (pendingState) { pendingState = null; renderTabs(); }
-  });
+  };
+  el.tabs.addEventListener('pointerup', (e) => endDrag(e, false));
+  el.tabs.addEventListener('pointercancel', (e) => endDrag(e, true));
   el.tabs.addEventListener('click', (e) => {
     const act = e.target.closest('[data-act]'); if (!act) return;
     const id = +act.closest('.tab').dataset.id;

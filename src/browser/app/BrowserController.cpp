@@ -13,6 +13,7 @@
 
 #include "../core/Log.h"
 #include "../core/Navigation.h"
+#include "../../../platform/windows/SysInfo.h"
 #include "../core/Security.h"
 #include "../core/SplitLayout.h"
 #include "../core/Util.h"
@@ -32,7 +33,7 @@ constexpr UINT_PTR kTimerHousekeeping = 1;
 constexpr UINT_PTR kTimerPush = 2;
 constexpr UINT_PTR kTimerDefer = 3;
 // Startup timing (ms since the process was created) goes to logs/browser.log as "startup: ...".
-void Mark(const char* what)
+long long ProcessAgeMs()
 {
     FILETIME created, exited, kernel, user, now;
     GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
@@ -40,7 +41,7 @@ void Mark(const char* what)
     ULARGE_INTEGER a{}, b{};
     a.LowPart = created.dwLowDateTime; a.HighPart = created.dwHighDateTime;
     b.LowPart = now.dwLowDateTime; b.HighPart = now.dwHighDateTime;
-    HB_INFO("startup: {} at {} ms", what, static_cast<unsigned long long>((b.QuadPart - a.QuadPart) / 10000));
+    return static_cast<long long>((b.QuadPart - a.QuadPart) / 10000);
 }
 
 // Page scripts run inside the page (ExecuteScript); constructed style sheets are not blocked by a page's CSP.
@@ -61,6 +62,12 @@ const std::vector<int>& ZoomLevels()
 
 }  // namespace
 
+void BrowserController::MarkStep(const char* what)
+{
+    dev_.Mark(what);
+    HB_INFO("startup: {} at {} ms", what, dev_.NowMs());
+}
+
 BrowserController::BrowserController(BrowserWindow& window, StartupOptions options)
     : window_(window), options_(std::move(options))
 {
@@ -75,6 +82,7 @@ bool BrowserController::Start()
     dataDir_ = win::ResolveDataDir();
     resDir_ = win::FindResources();
     InitLog(dataDir_ / L"logs" / L"browser.log");
+    dev_.Open(dataDir_ / L"dev.log", ProcessAgeMs());
     HB_INFO("HB Browser {} starting, data dir: {}", HB_VERSION, win::Narrow(dataDir_.wstring()));
 
     std::error_code ec;
@@ -87,10 +95,23 @@ bool BrowserController::Start()
     settings_ = std::make_unique<Settings>(dataDir_ / L"settings.json");
     settings_->Load();
     settings_->onChanged = [this](const std::string& key) { OnSettingChanged(key); };
+    dev_.SetEnabled(settings_->Get<bool>("devLog"));
+    if (!options_.secondary)
+    {
+        // A flag file marks "running". A normal exit removes it; if it is still there at the next start the browser was
+        // killed (Task Manager, power loss, Windows shutdown) and offers to bring the tabs back.
+        std::error_code fec;
+        const auto flag = dataDir_ / L"running.flag";
+        crashed_ = std::filesystem::exists(flag, fec);
+        std::ofstream(flag) << "1";
+    }
     SetCustomSearchEngines(Settings::CustomEngines(settings_->Get<json>("customSearchEngines")));
 
     const json w = settings_->Get<json>("window");
-    window_.ApplyPlacement(w.value("x", 0), w.value("y", 0), w.value("w", 0), w.value("h", 0), w.value("maximized", false));
+    if (options_.posX != INT_MIN && options_.posY != INT_MIN)
+        window_.ApplyPlacement(options_.posX, options_.posY, std::max(w.value("w", 0), 1100), std::max(w.value("h", 0), 700), false);
+    else
+        window_.ApplyPlacement(w.value("x", 0), w.value("y", 0), w.value("w", 0), w.value("h", 0), w.value("maximized", false));
 
     pendingUrls_ = options_.urls;
     views_ = std::make_unique<WebViewManager>(window_.UiHost(), window_.ContentHost(), *this, dataDir_ / L"WebView2", resDir_);
@@ -109,9 +130,9 @@ bool BrowserController::Start()
             lite = (GlobalMemoryStatusEx(&ms) && ms.ullTotalPhys <= (4ull << 30)) || si.dwNumberOfProcessors <= 2;
         }
     }
-    Mark("controller start");
+    MarkStep("controller start");
     views_->Initialize(win::Widen(LanguageTag()), lite);  // asynchronous: the engine boots while we open the database below
-    Mark("engine requested");
+    MarkStep("engine requested");
     storage_.Open(dataDir_ / L"browser.db");
     storage_.FailPendingDownloads();
     ReloadPlugins();
@@ -122,12 +143,18 @@ void BrowserController::OnClosing()
 {
     if (shuttingDown_) return;
     shuttingDown_ = true;
-    SaveSession();
+    if (!options_.secondary)
+    {
+        // Normal exit: nothing is remembered. (A killed browser / power-off leaves the flag file behind.)
+        std::error_code rec;
+        std::filesystem::remove(dataDir_ / L"session.json", rec);
+        std::filesystem::remove(dataDir_ / L"running.flag", rec);
 
-    int x, y, w, h;
-    bool maximized;
-    window_.GetPlacement(x, y, w, h, maximized);
-    settings_->Set("window", json{{"x", x}, {"y", y}, {"w", w}, {"h", h}, {"maximized", maximized}});
+        int x, y, w, h;
+        bool maximized;
+        window_.GetPlacement(x, y, w, h, maximized);
+        settings_->Set("window", json{{"x", x}, {"y", y}, {"w", w}, {"h", h}, {"maximized", maximized}});
+    }
 
     if (settings_->Get<bool>("clearOnExit"))
     {
@@ -172,7 +199,7 @@ void BrowserController::UpdateTheme()
     dark_ = mode == "dark" || (mode != "light" && win::SystemUsesDarkTheme());
     const COLORREF frame = dark_ ? kFrameDark : kFrameLight;
     window_.SetTheme(dark_, frame);
-    if (views_) views_->SetUiBackground(frame);
+    if (views_) { views_->SetUiBackground(frame); views_->SetContentBackground(dark_ ? kFrameDark : RGB(255, 255, 255)); }
 }
 
 void BrowserController::ApplyViewOptions()
@@ -384,7 +411,7 @@ void BrowserController::OnTimer(UINT_PTR id)
 void BrowserController::OnEnvironmentReady()
 {
     // Browser UI and the first tab are created in parallel instead of one after the other.
-    Mark("engine ready");
+    MarkStep("engine ready");
     views_->CreateUi();
     StartTabs();
 }
@@ -414,37 +441,80 @@ void BrowserController::StartTabs()
     }
     else if (options_.privateMode)
         NewTab("", true, true);
-    else if (startup == "restore")
-    {
-        std::ifstream in(dataDir_ / L"session.json", std::ios::binary);
-        std::stringstream ss;
-        ss << in.rdbuf();
-        const json session = json::parse(ss.str(), nullptr, false);
-        if (session.is_object() && session.contains("tabs") && session["tabs"].is_array())
-        {
-            const int activeIndex = session.value("active", 0);
-            int index = 0;
-            for (const auto& item : session["tabs"])
-            {
-                const std::string url = item.value("url", "");
-                if (url.empty() || !IsSafeTabUrl(url)) continue;  // session.json is user-writable: never trust it
-                const bool active = index == activeIndex;
-                const int id = tabs_.Add(url, false, active);
-                if (Tab* t = tabs_.Find(id))
-                {
-                    t->title = item.value("title", "");
-                    t->sleeping = !active;  // inactive tabs are only created when you open them
-                }
-                if (item.value("pinned", false)) tabs_.SetPinned(id, true);
-                ++index;
-            }
-            if (tabs_.Count() > 0) ActivateTab(tabs_.ActiveId());
-        }
-    }
-
     if (tabs_.Count() == 0)
+    {
         NewTab(startup == "home" ? settings_->Get<std::string>("homepage") : "", false, true);
+        if (pendingUrls_.empty() && !options_.privateMode) startupBlank_ = tabs_.ActiveId();
+    }
     PushState();
+}
+
+std::string BrowserController::NewTabTarget()
+{
+    if (settings_->Get<std::string>("newTabMode") == "custom")
+    {
+        const std::string u = settings_->Get<std::string>("newTabUrl");
+        if (!u.empty() && IsSafeTabUrl(u)) return u;
+    }
+    return {};
+}
+
+// Tabs of the previous run, only after an abnormal end and only when the user agrees.
+int BrowserController::RestoreSession()
+{
+    int restored = 0;
+    std::ifstream in(dataDir_ / L"session.json", std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const json session = json::parse(ss.str(), nullptr, false);
+    if (!(session.is_object() && session.contains("tabs") && session["tabs"].is_array())) return 0;
+    const int activeIndex = session.value("active", 0);
+    int index = 0, firstId = 0, activeId = 0;
+    for (const auto& item : session["tabs"])
+    {
+        const std::string url = item.is_object() && item.contains("url") && item["url"].is_string() ? item["url"].get<std::string>() : "";
+        if (url.empty() || !IsSafeTabUrl(url)) continue;  // session.json is user-writable: never trust it
+        const bool active = index == activeIndex;
+        const int id = tabs_.Add(url, false, false);
+        if (!firstId) firstId = id;
+        if (active) activeId = id;
+        if (Tab* t = tabs_.Find(id))
+        {
+            t->title = item.value("title", "");
+            t->sleeping = true;  // restored tabs are only created when you open them
+        }
+        if (item.value("pinned", false)) tabs_.SetPinned(id, true);
+        ++index;
+        ++restored;
+    }
+    if (restored > 0)
+    {
+        if (startupBlank_ && tabs_.Find(startupBlank_)) { const int blank = startupBlank_; startupBlank_ = 0; CloseTab(blank); }
+        ActivateTab(activeId ? activeId : firstId);
+        PushState();
+    }
+    return restored;
+}
+
+void BrowserController::OfferRestore()
+{
+    if (options_.secondary || !crashed_) return;
+    crashed_ = false;
+    std::ifstream in(dataDir_ / L"session.json", std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const json session = json::parse(ss.str(), nullptr, false);
+    if (!(session.is_object() && session.contains("tabs") && session["tabs"].is_array() && !session["tabs"].empty())) return;
+    const bool cs = StartsWith(ToLower(LanguageTag()), "cs");
+    Defer([this, cs]
+    {
+        if (shuttingDown_) return;
+        const int r = MessageBoxW(window_.Handle(),
+            cs ? L"Prohlížeč minule nebyl řádně ukončen.\n\nChcete obnovit karty, které jste měli otevřené?"
+               : L"The browser was not closed properly last time.\n\nDo you want to restore the tabs you had open?",
+            L"HB Browser", MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND);
+        if (r == IDYES && RestoreSession() == 0) Toast("restoreNone");
+    });
 }
 
 void BrowserController::OpenExternal(const std::vector<std::string>& urls)
@@ -460,6 +530,7 @@ void BrowserController::OpenExternal(const std::vector<std::string>& urls)
 void BrowserController::SaveSession()
 {
     sessionDirty_ = false;
+    if (shuttingDown_ || options_.secondary) return;
     json tabs = json::array();
     int active = 0, index = 0;
     for (const Tab& t : tabs_.All())
@@ -487,7 +558,9 @@ void BrowserController::SaveSession()
 
 int BrowserController::NewTab(const std::string& input, bool isPrivate, bool activate, int afterId, bool resolve)
 {
-    const std::string url = resolve ? ResolveInput(input, settings_->Get<std::string>("searchEngine")) : input;
+    std::string url;
+    if (resolve && input.empty() && !isPrivate && !NewTabTarget().empty()) url = NewTabTarget();   // user chose their own new tab address
+    else url = resolve ? ResolveInput(input, settings_->Get<std::string>("searchEngine")) : input;
     const int id = tabs_.Add(url, isPrivate, activate, afterId);
     views_->CreateTab(id, win::Widen(url), isPrivate);
     if (activate) views_->ShowTab(id);
@@ -512,7 +585,7 @@ void BrowserController::ActivateTab(int id)
         // Clicking the partner tab swaps the panes; leaving the pair ends the split view.
         if (id == splitId_) splitId_ = tabs_.ActiveId();
         else if (id != tabs_.ActiveId()) splitId_ = 0;
-        views_->SetSplit(splitId_, splitRatio_, splitSide_);
+        ApplySplit(splitId_);
     }
     tabs_.Activate(id);
     t->sleeping = false;
@@ -541,7 +614,7 @@ void BrowserController::CloseTab(int id)
     if (splitId_ && (id == splitId_ || id == tabs_.ActiveId()))
     {
         splitId_ = 0;
-        views_->SetSplit(0, splitRatio_, splitSide_);
+        ApplySplit(0);
     }
     const bool wasActive = id == tabs_.ActiveId();
     tabs_.Close(id);
@@ -711,7 +784,7 @@ void BrowserController::OnUiMessage(const std::string& jsonText)
     if (cmd == "ready")
     {
         uiReady_ = true;
-        Mark("browser UI ready");
+        MarkStep("browser UI ready");
         bookmarksDirty_ = true;
         PushState();
         if (const Tab* t = tabs_.Active(); t && IsInternalUrl(t->url) && ToDisplay(t->url) == "hb://newtab")
@@ -721,6 +794,7 @@ void BrowserController::OnUiMessage(const std::string& jsonText)
             PostUi({{"type", "focusOmnibox"}});
         }
         if (settings_->Get<bool>("checkUpdates") && !options_.privateMode) StartUpdateCheck(0, "null", true);
+        OfferRestore();
         return;
     }
     Exec(cmd, j);
@@ -771,6 +845,12 @@ void BrowserController::Exec(const std::string& c, const json& a)
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
         }
+    }
+    else if (c == "tearTab")
+    {
+        const int sx = a.is_object() && a.contains("x") && a["x"].is_number_integer() ? a["x"].get<int>() : 100;
+        const int sy = a.is_object() && a.contains("y") && a["y"].is_number_integer() ? a["y"].get<int>() : 100;
+        TearTab(id, std::clamp(sx, -4000, 20000), std::clamp(sy, -4000, 20000));
     }
     else if (c == "closeTab") Defer([this, id] { CloseTab(id); });
     else if (c == "reopenClosed")
@@ -872,7 +952,7 @@ void BrowserController::Exec(const std::string& c, const json& a)
     else if (c == "zoomReset") Zoom(0);
     else if (c == "split")
     {
-        if (splitId_) { splitId_ = 0; views_->SetSplit(0, splitRatio_, splitSide_); PushState(); }
+        if (splitId_) { splitId_ = 0; ApplySplit(0); PushState(); }
         else if (act)
         {
             int partner = 0;
@@ -885,7 +965,7 @@ void BrowserController::Exec(const std::string& c, const json& a)
             if (!partner) partner = NewTab("", act->isPrivate, false, aid);
             EnsureView(partner);
             splitId_ = partner;
-            views_->SetSplit(splitId_, splitRatio_, splitSide_);
+            ApplySplit(splitId_);
             PushState();
         }
     }
@@ -897,7 +977,7 @@ void BrowserController::Exec(const std::string& c, const json& a)
         {
             if (c == "splitRotate") splitSide_ = !splitSide_;
             else if (a.is_object() && a.contains("ratio") && a["ratio"].is_number()) splitRatio_ = ClampSplitRatio(a["ratio"].get<double>());
-            views_->SetSplit(splitId_, splitRatio_, splitSide_);
+            ApplySplit(splitId_);
         }
     }
     else if (c == "devtools")
@@ -1182,6 +1262,24 @@ nlohmann::json BrowserController::Rpc(int tabId, const std::string& id, const st
         return false;
     }
 
+    if (cmd == "dev.info") return DevInfo();
+    if (cmd == "dev.perf")
+    {
+        auto num = [&](const char* k) -> long long { return a.is_object() && a.contains(k) && a[k].is_number() ? std::clamp<long long>(a[k].get<long long>(), 0, 600000) : -1; };
+        std::string page = a.is_object() && a.contains("page") && a["page"].is_string() ? a["page"].get<std::string>().substr(0, 60) : "?";
+        for (char& ch : page) if (static_cast<unsigned char>(ch) < 0x20) ch = '_';
+        std::string line = "internal page " + page;
+        if (num("ready") >= 0) line += " ready (after page.init) at " + std::to_string(num("ready")) + " ms since page start";
+        else
+        {
+            line += ": DOMContentLoaded " + std::to_string(num("dcl")) + " ms, load " + std::to_string(num("load")) + " ms, " + std::to_string(num("resources")) + " resources";
+            std::string slow = a.contains("slowName") && a["slowName"].is_string() ? a["slowName"].get<std::string>().substr(0, 60) : "";
+            for (char& ch : slow) if (static_cast<unsigned char>(ch) < 0x20) ch = '_';
+            if (!slow.empty()) line += ", slowest " + slow + " " + std::to_string(num("slowMs")) + " ms";
+        }
+        dev_.Info(line);
+        return true;
+    }
     if (cmd == "plugins.list")
     {
         json out = json::array();
@@ -1270,6 +1368,61 @@ json BrowserController::Dictionary(const std::string& lang)
     json d = json::parse(ss.str(), nullptr, false);
     if (!d.is_object()) d = json::object();
     return dictCache_[lang] = std::move(d);
+}
+
+void BrowserController::ApplySplit(int second)
+{
+    views_->SetSplit(second, splitRatio_, splitSide_, window_.SplitGapPx());
+    window_.SetSplitState(second != 0, splitSide_, splitRatio_);
+}
+
+void BrowserController::OnSplitRatio(double ratio)
+{
+    if (!splitId_) return;
+    splitRatio_ = ClampSplitRatio(ratio);
+    ApplySplit(splitId_);
+}
+
+void BrowserController::TearTab(int id, int x, int y)
+{
+    const Tab* t = tabs_.Find(id);
+    if (!t || tabs_.Count() < 2) return;
+    std::string url = IsInternalUrl(t->url) ? ToDisplay(t->url) : t->url;
+    if (!IsInternalUrl(t->url) && !IsSafeTabUrl(url)) return;
+    for (size_t p; (p = url.find('"')) != std::string::npos;) url.replace(p, 1, "%22");
+    std::wstring cmd = L"\"" + win::ExePath().wstring() + L"\" --new-instance --secondary";
+    if (t->isPrivate) cmd += L" --private";
+    cmd += L" --pos " + std::to_wstring(x - 120) + L" " + std::to_wstring(std::max(0, y - 20)) + L" \"" + win::Widen(url) + L"\"";
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+    {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        Defer([this, id] { CloseTab(id); });
+    }
+}
+
+nlohmann::json BrowserController::DevInfo()
+{
+    json steps = json::array();
+    for (const DevEntry& e : dev_.Entries()) steps.push_back({{"text", e.text}, {"at", e.atMs}, {"delta", e.deltaMs}});
+    return {{"system", win::CollectSystemInfo(dataDir_, views_ ? views_->RuntimeVersion() : std::string(), HB_VERSION, window_.Handle())},
+            {"steps", steps}, {"hints", dev_.Hints()}, {"logPath", win::Narrow((dataDir_ / L"dev.log").wstring())}};
+}
+
+void BrowserController::LogSystemInfo()
+{
+    const json sys = win::CollectSystemInfo(dataDir_, views_ ? views_->RuntimeVersion() : std::string(), HB_VERSION, window_.Handle());
+    for (auto it = sys.begin(); it != sys.end(); ++it) dev_.Info("SYSTEM " + it.key() + ": " + it.value().dump());
+    if (sys.contains("storage") && sys["storage"].contains("warning")) dev_.Info("HINT " + sys["storage"]["warning"].get<std::string>());
+}
+
+std::string BrowserController::NavLabel(const std::string& url)
+{
+    if (IsInternalUrl(url)) return ToDisplay(url);
+    const std::string host = HostOf(url);
+    return host.empty() ? std::string("(other)") : host;  // host only: paths and queries stay out of the log
 }
 
 void BrowserController::ReloadPlugins()
@@ -1509,6 +1662,7 @@ void BrowserController::OnTabReady(int tabId)
 {
     Tab* t = tabs_.Find(tabId);
     if (!t) return;
+    window_.SetLoading(false);
     if (t->isPrivate && !views_->PrivateSupported())
     {
         t->isPrivate = false;
@@ -1532,6 +1686,7 @@ void BrowserController::OnTabReady(int tabId)
 void BrowserController::OnNavigationStarting(int tabId, const std::string&)
 {
     if (Tab* t = tabs_.Find(tabId)) { t->loading = true; t->sleeping = false; }
+    navStart_[tabId] = dev_.NowMs();
     RequestPush();
 }
 
@@ -1541,8 +1696,19 @@ void BrowserController::OnNavigationCompleted(int tabId, bool success)
     if (!t) return;
     t->loading = false;
     ApplyZoom(tabId);
+    if (auto st = navStart_.find(tabId); st != navStart_.end())
+    {
+        dev_.Timing(std::string(success ? "page " : "page FAILED ") + NavLabel(t->url), dev_.NowMs() - st->second);
+        navStart_.erase(st);
+    }
     static bool firstLoad = true;
-    if (firstLoad && tabId == tabs_.ActiveId()) { firstLoad = false; Mark("first page loaded"); }
+    if (firstLoad && tabId == tabs_.ActiveId())
+    {
+        firstLoad = false;
+        MarkStep("first page loaded");
+        dev_.WriteHints();
+        Defer([this] { if (!shuttingDown_) LogSystemInfo(); });   // after the user already sees the page
+    }
     if (success && !t->isPrivate && settings_->Get<bool>("stayLoggedIn") && static_cast<int64_t>(tick_) - lastCookieTick_ >= 20)
     {
         lastCookieTick_ = static_cast<int64_t>(tick_);

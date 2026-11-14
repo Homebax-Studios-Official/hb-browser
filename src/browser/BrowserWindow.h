@@ -1,5 +1,7 @@
 #pragma once
 #include <windows.h>
+#include <algorithm>
+#include <climits>
 
 #include <memory>
 #include <string>
@@ -13,6 +15,8 @@ struct StartupOptions
 {
     std::vector<std::string> urls;
     bool privateMode = false;
+    bool secondary = false;      // window torn off another one: no session handling
+    int posX = INT_MIN, posY = INT_MIN;  // optional start position (screen pixels)
 };
 
 // Win32 frame: custom title bar area, two host child windows (browser UI + page content), DPI, fullscreen.
@@ -34,6 +38,11 @@ public:
     // Called by the controller. All sizes from the UI are CSS pixels.
     void SetShellHeight(int cssPx);
     void Relayout() { Layout(); }
+    // Minimal start-up indicator in the content area (until the first page view exists).
+    void SetLoading(bool on);
+    // Split view divider (dragged with the mouse): the controller tells us where it is.
+    void SetSplitState(bool active, bool sideBySide, double ratio);
+    int SplitGapPx() const { return std::max(6, Scaled(8)); }
     // Developer tools: the engine opens them in their own window; this snaps that window to the right edge of the
     // content area (content shrinks to make room) and releases the space when it is closed.
     void BeginDock();
@@ -67,6 +76,14 @@ private:
     HWND uiHost_{};
     HWND contentHost_{};
     HBRUSH background_{};
+    COLORREF bgColor_ = RGB(28, 29, 33);
+    bool loading_ = true;
+    int spinnerPhase_ = 0;
+    bool splitActive_ = false, splitSide_ = true, splitDrag_ = false;
+    double splitRatio_ = 0.5;
+    void PaintSpinner(HDC dc, const RECT& rc);
+    bool OverSplitter(POINT p) const;
+    void DragSplitter(int x, int y);
     double scale_ = 1.0;
     int shellCss_ = 88;
     std::vector<RECT> overlays_;

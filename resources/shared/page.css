@@ -26,3 +26,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 dialog label { display: block; margin: 10px 0 4px; font-weight: 550; }
 dialog input { width: 100%; }
 dialog .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+
+/* ---- screens: phone, tablet, desktop ---- */
+@media (max-width: 700px) { .page { padding: 14px 12px; } .row { flex-wrap: wrap; gap: 8px; } .row .wide { width: 100%; min-width: 0; } }
+@media (pointer: coarse) { .btn, select, input[type=text] { min-height: 40px; } }

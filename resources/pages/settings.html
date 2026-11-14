@@ -24,7 +24,8 @@
   const PRESETS = ['#4f7cff', '#7c5cff', '#e5484d', '#f08a24', '#2fa66a', '#0ea5a4', '#d946a8'];
   const SECTIONS = [
     { id: 'general', icon: 'home', items: [
-      { key: 'startup', type: 'select', opts: [['restore', 'opt_restore'], ['newtab', 'opt_newtab'], ['home', 'opt_home']] },
+      { key: 'startup', type: 'select', opts: [['newtab', 'opt_newtab'], ['home', 'opt_home']] },
+      { key: 'newTabMode', type: 'select', opts: [['default', 'nt_default'], ['custom', 'nt_custom']] }, { key: 'newTabUrl', type: 'text' },
       { key: 'homepage', type: 'text' }, { key: 'checkUpdates', type: 'toggle' }, { key: 'stayLoggedIn', type: 'toggle' }, { key: 'cleanUrls', type: 'toggle' },
       { key: 'language', type: 'select', opts: [['auto', 'lang_auto'], ['cs', 'Čeština'], ['en', 'English']] },
       { type: 'button', id: 'defaultBrowser', label: 's_defaultBrowser', hint: 'h_defaultBrowser', btn: 'setDefault' } ] },
@@ -43,9 +44,30 @@
       { key: 'sleepAfterMinutes', type: 'select', num: true, opts: [[5, '5'], [10, '10'], [15, '15'], [30, '30'], [60, '60']], unit: 'minutes' },
       { key: 'defaultZoom', type: 'select', num: true, opts: [75, 80, 90, 100, 110, 125, 150, 175, 200].map((z) => [z, z + ' %']) } ] },
     { id: 'advanced', icon: 'code', items: [{ key: 'devTools', type: 'toggle' }, { key: 'singleInstance', type: 'toggle' }] },
+    { id: 'dev', icon: 'code', items: [{ key: 'devLog', type: 'toggle' }, { type: 'devPanel' }] },
   ];
   const row = (label, hint, control) => '<div class="row"><div class="grow"><div class="label">' + esc(label) + '</div>' + (hint ? '<div class="hint">' + esc(hint) + '</div>' : '') + '</div>' + control + '</div>';
   const lab = (k) => t('s_' + k), hnt = (k) => { const h = t('h_' + k); return h === 'h_' + k ? '' : h; };
+  const kv = (k, v) => '<tr><td style="opacity:.65;padding:2px 14px 2px 0;white-space:nowrap;vertical-align:top">' + esc(k) + '</td><td style="padding:2px 0;word-break:break-word">' + esc(v) + '</td></tr>';
+  const block = (title, rows) => '<div class="label" style="margin:14px 0 4px">' + esc(title) + '</div><table style="font-size:12.5px;border-collapse:collapse">' + rows + '</table>';
+  function renderDev(d) {
+    const s = d.system || {}, o = s.os || {}, c = s.cpu || {}, r = s.ram || {}, st = s.storage || {}, dx = s.directx || {}, dp = s.display || {}, sdk = s.sdk || {}, bp = s.browserProcess || {};
+    let h = '';
+    h += block(t('devHints'), (d.hints || []).map((x) => '<tr><td colspan="2">• ' + esc(x) + '</td></tr>').join(''));
+    h += block(t('devSteps'), (d.steps || []).map((x) => kv(x.text, x.at + ' ms  (+' + x.delta + ')')).join(''));
+    h += block('OS', kv('Windows', (o.name || '') + ' ' + (o.release || '') + ' (' + (o.version || '') + ', ' + (o.arch || '') + ')'));
+    h += block('CPU', kv('CPU', c.name || '?') + kv(t('devCores'), c.logicalCores) + kv('arch', c.arch || ''));
+    h += block('RAM', kv(t('devTotal'), r.totalMB + ' MB') + kv(t('devFree'), r.availableMB + ' MB') + kv(t('devLoad'), r.load + ' %') +
+      (bp.workingSetMB !== undefined ? kv(t('devBrowserRam'), bp.workingSetMB + ' MB (private ' + bp.privateMB + ' MB)') : ''));
+    h += block('GPU', (s.gpu || []).map((g) => kv(g.name, g.vramMB + ' MB VRAM' + (g.software ? ' (software)' : ''))).join(''));
+    h += block('DirectX', kv('Direct3D 11', dx.direct3d11 || '?') + kv('Direct3D 12', dx.direct3d12 || '?'));
+    h += block(t('devStorage'), kv(st.drive || '', (st.type || '') + ', ' + (st.freeGB || 0).toFixed(1) + ' / ' + (st.totalGB || 0).toFixed(1) + ' GB') + (st.warning ? kv('!', st.warning) : ''));
+    h += block(t('devDisplay'), kv(t('devMonitors'), dp.monitors) + kv(t('devResolution'), dp.primaryWidth + ' × ' + dp.primaryHeight) + kv('DPI', dp.dpi));
+    h += block('SDK / ' + t('devVersions'), Object.keys(sdk).map((k) => kv(k, sdk[k])).join(''));
+    h += block(t('devEngines'), (s.engines || []).map((e) => kv(e.name, e.version + ' — ' + e.role)).join(''));
+    h += '<div class="hint" style="margin-top:12px">' + esc(d.logPath || '') + '</div>';
+    return h;
+  }
   function control(it) {
     const v = S[it.key];
     switch (it.type) {
@@ -54,6 +76,7 @@
       case 'select': return row(lab(it.key), hnt(it.key), '<select data-key="' + it.key + '"' + (it.num ? ' data-num' : '') + '>' +
         it.opts.map((o) => '<option value="' + o[0] + '"' + (String(o[0]) === String(v) ? ' selected' : '') + '>' + esc(t(o[1])) + (it.unit ? ' ' + esc(t(it.unit)) : '') + '</option>').join('') + '</select>');
       case 'engines': return row(lab(it.key), '', '<select data-key="searchEngine">' + info.engines.map((e) => '<option value="' + e.id + '"' + (e.id === v ? ' selected' : '') + '>' + esc(e.name) + '</option>').join('') + '</select>');
+      case 'devPanel': return row(t('s_devRun'), t('h_devRun'), '<button class="btn primary" data-act="devRun">' + esc(t('devRun')) + '</button>') + '<div id="devOut"></div>';
       case 'resetPerms': return row(t('s_sitePerms'), t('h_sitePerms'), '<button class="btn" data-act="resetPerms">' + esc(t('reset')) + '</button>');
       case 'customEngines': return '<div class="row"><div class="grow"><div class="label">' + esc(t('s_customEngines')) + '</div><div class="hint">' + esc(t('h_customEngines')) + '</div></div></div>' +
         (S.customSearchEngines || []).map((e) => row(e.name, e.url, '<button class="btn" data-act="delEngine" data-id="' + esc(e.id) + '">' + esc(t('removeEngine')) + '</button>')).join('') +
@@ -93,6 +116,10 @@
     const a = e.target.closest('[data-act]'); if (!a) return;
     if (a.dataset.act === 'pick') { await hb.call('settings.pickFolder'); info = await hb.call('app.info'); S = await hb.call('settings.get'); render(); }
     else if (a.dataset.act === 'resetDir') { await set('downloadDir', ''); info = await hb.call('app.info'); render(); }
+    else if (a.dataset.act === 'devRun') {
+      const out = document.getElementById('devOut'); out.textContent = '…';
+      try { out.innerHTML = renderDev(await hb.call('dev.info')); } catch (e) { out.textContent = t('devFail'); }
+    }
     else if (a.dataset.act === 'resetPerms') { await set('sitePermissions', {}); a.textContent = '✓'; }
     else if (a.dataset.act === 'addEngine') {
       const name = document.getElementById('ceName').value.trim(), url = document.getElementById('ceUrl').value.trim();

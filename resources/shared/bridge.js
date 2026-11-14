@@ -35,4 +35,18 @@
     });
   }
   window.hb = hb;
+
+  // Timing of internal pages goes to dev.log (native side decides whether it is written).
+  if (wv && location.pathname.indexOf('/pages/') >= 0) {
+    window.addEventListener('load', () => setTimeout(() => {
+      try {
+        const n = performance.getEntriesByType('navigation')[0] || {};
+        const res = performance.getEntriesByType('resource');
+        let slow = { name: '', ms: 0 };
+        res.forEach((r) => { if (r.duration > slow.ms) slow = { name: r.name.split('/').pop(), ms: r.duration }; });
+        hb.call('dev.perf', { page: location.pathname.split('/').pop(), dcl: Math.round(n.domContentLoadedEventEnd || 0),
+          load: Math.round(n.loadEventEnd || performance.now()), resources: res.length, slowName: slow.name, slowMs: Math.round(slow.ms) }).catch(() => {});
+      } catch (e) { /* diagnostics only */ }
+    }, 0));
+  }
 })();

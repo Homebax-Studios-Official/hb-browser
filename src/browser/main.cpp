@@ -44,6 +44,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         const std::wstring a = argv[i];
         if (a == L"--private" || a == L"-private") options.privateMode = true;
         else if (a == L"--new-instance") newInstance = true;
+        else if (a == L"--secondary") options.secondary = true;
+        else if (a == L"--pos" && i + 2 < argc) { options.posX = _wtoi(argv[++i]); options.posY = _wtoi(argv[++i]); }
         else if (!a.empty() && a[0] != L'-') options.urls.push_back(ToUrl(a));
     }
     if (argv) LocalFree(argv);

@@ -1,6 +1,7 @@
 #include "core/Navigation.h"
 #include "core/Settings.h"
 #include "core/Security.h"
+#include "core/DevLog.h"
 #include "core/Plugins.h"
 #include "core/SplitLayout.h"
 #include "core/Storage.h"
@@ -32,6 +33,18 @@ int main() {
   EQ(SchemeOf("HTTPS://x"), "https");
   CHECK(CompareVersions("2.1.10","2.1.2") > 0); CHECK(CompareVersions("2.1.2","2.1.2")==0); CHECK(CompareVersions("2.0","2.0.1") < 0); CHECK(CompareVersions("v3","2.9.9")>0);
 
+  CHECK(!Settings::IsValid("startup", "restore")); CHECK(Settings::IsValid("startup", "home")); CHECK(Settings::IsValid("newTabMode", "custom"));
+  CHECK(Settings::IsValid("newTabUrl", "https://a.cz/")); CHECK(!Settings::IsValid("newTabUrl", "javascript:1")); CHECK(Settings::IsValid("newTabUrl", ""));
+  {
+    DevLog d; auto f = std::filesystem::temp_directory_path() / "hb_devlog_test.log"; d.Open(f, 500);
+    d.Mark("controller start"); d.Mark("engine requested"); CHECK(d.Entries().size() == 2 && d.Entries()[0].atMs >= 500);
+    DevLog slow; slow.Open(f, 0); // build slow marks through direct entries is not possible: check the "fast" message path
+    slow.Mark("controller start"); slow.Mark("engine requested"); slow.Mark("engine ready"); slow.Mark("browser UI ready"); slow.Mark("first page loaded");
+    auto hints = slow.Hints(); CHECK(hints.size() == 1 && hints[0].find("No slow startup step") == 0);
+    DevLog bad; bad.Open(f, 0); bad.Record(1200, "controller start"); bad.Record(1300, "engine requested"); bad.Record(3500, "engine ready"); bad.Record(4600, "browser UI ready"); bad.Record(6100, "first page loaded");
+    CHECK(bad.Hints().size() == 5);
+    slow.WriteHints(); std::error_code ec; std::filesystem::remove(f, ec);
+  }
   // split view, plugins, tracking params
   { auto r = ComputeSplit({0, 0, 1000, 500}, 0.5, true, 4); CHECK(r.first.w == 498 && r.second.x == 502 && r.second.w == 498 && r.first.h == 500); }
   { auto r = ComputeSplit({10, 20, 100, 100}, 0.99, false, 0); CHECK(r.first.h == 80 && r.second.y == 100 && r.second.h == 20); }
