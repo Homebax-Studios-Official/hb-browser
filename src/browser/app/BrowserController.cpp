@@ -14,11 +14,12 @@
 #include "../core/Log.h"
 #include "../core/Navigation.h"
 #include "../core/Security.h"
+#include "../core/SplitLayout.h"
 #include "../core/Util.h"
 #include "../../../platform/windows/WinUtil.h"
 
 #ifndef HB_VERSION
-#define HB_VERSION "2.5.0"
+#define HB_VERSION "3.1.0"
 #endif
 
 using Microsoft::WRL::Callback;
@@ -30,6 +31,18 @@ namespace {
 constexpr UINT_PTR kTimerHousekeeping = 1;
 constexpr UINT_PTR kTimerPush = 2;
 constexpr UINT_PTR kTimerDefer = 3;
+// Startup timing (ms since the process was created) goes to logs/browser.log as "startup: ...".
+void Mark(const char* what)
+{
+    FILETIME created, exited, kernel, user, now;
+    GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER a{}, b{};
+    a.LowPart = created.dwLowDateTime; a.HighPart = created.dwHighDateTime;
+    b.LowPart = now.dwLowDateTime; b.HighPart = now.dwHighDateTime;
+    HB_INFO("startup: {} at {} ms", what, static_cast<unsigned long long>((b.QuadPart - a.QuadPart) / 10000));
+}
+
 // Page scripts run inside the page (ExecuteScript); constructed style sheets are not blocked by a page's CSP.
 const wchar_t* kNightJs = LR"JS((()=>{try{const k='__hbNight';if(window[k]){document.adoptedStyleSheets=document.adoptedStyleSheets.filter(s=>s!==window[k]);window[k]=null;return}const s=new CSSStyleSheet();s.replaceSync('html{filter:invert(1) hue-rotate(180deg)!important;background:#fff}img,picture,video,canvas,iframe{filter:invert(1) hue-rotate(180deg)!important}');document.adoptedStyleSheets=[...document.adoptedStyleSheets,s];window[k]=s}catch(e){}})())JS";
 const wchar_t* kReaderJs = LR"JS((()=>{try{if(window.__hbReader)return;window.__hbReader=1;const ps=n=>n.querySelectorAll('p').length;let pick=document.querySelector('article')||document.querySelector('main');if(!pick||ps(pick)<2){pick=[...document.querySelectorAll('div,section')].filter(x=>ps(x)>2).sort((a,b)=>b.innerText.length-a.innerText.length)[0]||document.body}const c=pick.cloneNode(true);c.querySelectorAll('script,style,iframe,form,nav,aside,footer,noscript,button,video,[role=banner],[aria-hidden=true]').forEach(n=>n.remove());const t=document.title;document.querySelectorAll('link[rel=stylesheet],style').forEach(n=>n.remove());const st=document.createElement('style');st.textContent='body{max-width:720px;margin:40px auto;padding:0 20px;font:19px/1.7 Georgia,serif;color:#222;background:#faf8f3}img{max-width:100%;height:auto}a{color:#2456d8}h1{font:700 30px/1.25 system-ui,sans-serif}@media(prefers-color-scheme:dark){body{background:#1b1b1d;color:#ddd}a{color:#8fb0ff}}';document.head.append(st);const h=document.createElement('h1');h.textContent=t;document.body.replaceChildren(h,c);window.scrollTo(0,0)}catch(e){}})())JS";
@@ -76,9 +89,6 @@ bool BrowserController::Start()
     settings_->onChanged = [this](const std::string& key) { OnSettingChanged(key); };
     SetCustomSearchEngines(Settings::CustomEngines(settings_->Get<json>("customSearchEngines")));
 
-    storage_.Open(dataDir_ / L"browser.db");
-    storage_.FailPendingDownloads();
-
     const json w = settings_->Get<json>("window");
     window_.ApplyPlacement(w.value("x", 0), w.value("y", 0), w.value("w", 0), w.value("h", 0), w.value("maximized", false));
 
@@ -99,7 +109,12 @@ bool BrowserController::Start()
             lite = (GlobalMemoryStatusEx(&ms) && ms.ullTotalPhys <= (4ull << 30)) || si.dwNumberOfProcessors <= 2;
         }
     }
-    views_->Initialize(win::Widen(LanguageTag()), lite);
+    Mark("controller start");
+    views_->Initialize(win::Widen(LanguageTag()), lite);  // asynchronous: the engine boots while we open the database below
+    Mark("engine requested");
+    storage_.Open(dataDir_ / L"browser.db");
+    storage_.FailPendingDownloads();
+    ReloadPlugins();
     return true;
 }
 
@@ -170,18 +185,20 @@ void BrowserController::ApplyViewOptions()
     o.passwordAutosave = settings_->Get<bool>("passwordAutosave");
     o.autofill = settings_->Get<bool>("generalAutofill");
     o.devTools = settings_->Get<bool>("devTools");
+    o.cleanUrls = settings_->Get<bool>("cleanUrls");
     views_->SetOptions(o);
 }
 
 void BrowserController::OnSettingChanged(const std::string& key)
 {
+    if (key == "plugins") ReloadPlugins();
     if (key == "customSearchEngines") SetCustomSearchEngines(Settings::CustomEngines(settings_->Get<json>("customSearchEngines")));
     if (key == "theme" || key == "accent")
     {
         UpdateTheme();
         ApplyViewOptions();
     }
-    else if (key == "trackingPrevention" || key == "passwordAutosave" || key == "generalAutofill" || key == "devTools")
+    else if (key == "trackingPrevention" || key == "passwordAutosave" || key == "generalAutofill" || key == "devTools" || key == "cleanUrls")
         ApplyViewOptions();
     NotifyPages("settings");
     RequestPush();
@@ -233,6 +250,7 @@ nlohmann::json BrowserController::BuildState()
                         {"sleeping", t.sleeping}, {"private", t.isPrivate}});
     s["tabs"] = list;
     s["activeId"] = tabs_.ActiveId();
+    s["split"] = splitId_;
 
     if (const Tab* a = tabs_.Active())
     {
@@ -331,6 +349,7 @@ void BrowserController::OnTimer(UINT_PTR id)
     if (id != kTimerHousekeeping) return;
 
     ++tick_;
+    if (tick_ % 120 == 0 && !options_.privateMode && settings_->Get<bool>("stayLoggedIn")) views_->PersistSessionCookies();
     if (downloadsDirty_) PushDownloads();
     if (tick_ % 10 == 0 && sessionDirty_) SaveSession();
 
@@ -365,6 +384,7 @@ void BrowserController::OnTimer(UINT_PTR id)
 void BrowserController::OnEnvironmentReady()
 {
     // Browser UI and the first tab are created in parallel instead of one after the other.
+    Mark("engine ready");
     views_->CreateUi();
     StartTabs();
 }
@@ -487,6 +507,13 @@ void BrowserController::ActivateTab(int id)
 {
     Tab* t = tabs_.Find(id);
     if (!t) return;
+    if (splitId_)
+    {
+        // Clicking the partner tab swaps the panes; leaving the pair ends the split view.
+        if (id == splitId_) splitId_ = tabs_.ActiveId();
+        else if (id != tabs_.ActiveId()) splitId_ = 0;
+        views_->SetSplit(splitId_, splitRatio_, splitSide_);
+    }
     tabs_.Activate(id);
     t->sleeping = false;
     EnsureView(id);
@@ -511,6 +538,11 @@ void BrowserController::ActivateTab(int id)
 void BrowserController::CloseTab(int id)
 {
     if (!tabs_.Find(id)) return;
+    if (splitId_ && (id == splitId_ || id == tabs_.ActiveId()))
+    {
+        splitId_ = 0;
+        views_->SetSplit(0, splitRatio_, splitSide_);
+    }
     const bool wasActive = id == tabs_.ActiveId();
     tabs_.Close(id);
     views_->CloseTab(id);
@@ -679,6 +711,7 @@ void BrowserController::OnUiMessage(const std::string& jsonText)
     if (cmd == "ready")
     {
         uiReady_ = true;
+        Mark("browser UI ready");
         bookmarksDirty_ = true;
         PushState();
         if (const Tab* t = tabs_.Active(); t && IsInternalUrl(t->url) && ToDisplay(t->url) == "hb://newtab")
@@ -837,6 +870,36 @@ void BrowserController::Exec(const std::string& c, const json& a)
     else if (c == "zoomIn") Zoom(1);
     else if (c == "zoomOut") Zoom(-1);
     else if (c == "zoomReset") Zoom(0);
+    else if (c == "split")
+    {
+        if (splitId_) { splitId_ = 0; views_->SetSplit(0, splitRatio_, splitSide_); PushState(); }
+        else if (act)
+        {
+            int partner = 0;
+            for (int i = tabs_.IndexOf(aid) + 1; !partner; ++i)
+            {
+                const int cand = tabs_.AtIndex(i);
+                if (cand < 0) break;
+                if (cand != aid) partner = cand;
+            }
+            if (!partner) partner = NewTab("", act->isPrivate, false, aid);
+            EnsureView(partner);
+            splitId_ = partner;
+            views_->SetSplit(splitId_, splitRatio_, splitSide_);
+            PushState();
+        }
+    }
+    else if (c == "splitRatio" || c == "splitRotate" || c == "splitSwap")
+    {
+        if (!splitId_) Toast("splitFirst");
+        else if (c == "splitSwap") ActivateTab(splitId_);
+        else
+        {
+            if (c == "splitRotate") splitSide_ = !splitSide_;
+            else if (a.is_object() && a.contains("ratio") && a["ratio"].is_number()) splitRatio_ = ClampSplitRatio(a["ratio"].get<double>());
+            views_->SetSplit(splitId_, splitRatio_, splitSide_);
+        }
+    }
     else if (c == "devtools")
     {
         if (window_.HasDock()) window_.CloseDock();
@@ -1119,6 +1182,65 @@ nlohmann::json BrowserController::Rpc(int tabId, const std::string& id, const st
         return false;
     }
 
+    if (cmd == "plugins.list")
+    {
+        json out = json::array();
+        const json state = settings_->Get<json>("plugins");
+        for (const Plugin& p : plugins_)
+        {
+            json m = json::array();
+            for (const auto& sc : p.scripts) for (const auto& x : sc.matches) m.push_back(x);
+            out.push_back({{"id", p.id}, {"name", p.name}, {"version", p.version}, {"description", p.description},
+                           {"enabled", state.is_object() && state.contains(p.id) && state[p.id].is_boolean() && state[p.id].get<bool>()},
+                           {"allSites", p.allSites}, {"matches", m}});
+        }
+        return out;
+    }
+    if (cmd == "plugins.install")
+    {
+        const std::wstring chosen = win::PickFolder(window_.Handle(), L"");
+        if (chosen.empty()) return json{{"ok", false}, {"cancelled", true}};
+        std::error_code ec;
+        std::filesystem::create_directories(dataDir_ / L"plugins", ec);
+        Plugin p;
+        std::string err;
+        // Install first, then ask about the installed copy (what the user approves is exactly what runs).
+        if (!InstallPlugin(std::filesystem::path(chosen), dataDir_ / L"plugins", p, err)) return json{{"ok", false}, {"error", err}};
+        const bool cs = StartsWith(ToLower(LanguageTag()), "cs");
+        std::wstring text = win::Widen(p.name + " " + p.version) + L"\n\n" + (cs ? L"Plugin bude upravovat tyto weby:\n" : L"This plugin will modify these sites:\n");
+        int n = 0;
+        for (const auto& sc : p.scripts) for (const auto& m : sc.matches) if (n++ < 8) text += L"  " + win::Widen(m) + L"\n";
+        if (n > 8) text += L"  ...\n";
+        if (p.allSites) text += cs ? L"\nPOZOR: má přístup ke VŠEM webům!\n" : L"\nWARNING: it can access ALL websites!\n";
+        text += cs ? L"\nNainstalovat?" : L"\nInstall?";
+        if (MessageBoxW(window_.Handle(), text.c_str(), L"HB Browser", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+        {
+            RemovePlugin(dataDir_ / L"plugins", p.id);
+            return json{{"ok", false}, {"cancelled", true}};
+        }
+        json state = settings_->Get<json>("plugins");
+        if (!state.is_object()) state = json::object();
+        state[p.id] = true;
+        settings_->Set("plugins", state);
+        ReloadPlugins();
+        return json{{"ok", true}, {"id", p.id}};
+    }
+    if (cmd == "plugins.enable" || cmd == "plugins.remove")
+    {
+        const std::string pid = a.is_object() && a.contains("id") && a["id"].is_string() ? a["id"].get<std::string>() : "";
+        if (std::none_of(plugins_.begin(), plugins_.end(), [&](const Plugin& p) { return p.id == pid; })) throw std::runtime_error("unknown plugin");
+        json state = settings_->Get<json>("plugins");
+        if (!state.is_object()) state = json::object();
+        if (cmd == "plugins.remove")
+        {
+            RemovePlugin(dataDir_ / L"plugins", pid);
+            state.erase(pid);
+        }
+        else state[pid] = a.contains("enabled") && a["enabled"].is_boolean() && a["enabled"].get<bool>();
+        settings_->Set("plugins", state);
+        ReloadPlugins();
+        return true;
+    }
     if (cmd == "update.check")
     {
         deferred = true;
@@ -1148,6 +1270,17 @@ json BrowserController::Dictionary(const std::string& lang)
     json d = json::parse(ss.str(), nullptr, false);
     if (!d.is_object()) d = json::object();
     return dictCache_[lang] = std::move(d);
+}
+
+void BrowserController::ReloadPlugins()
+{
+    plugins_ = LoadPlugins(dataDir_ / L"plugins");
+    const json state = settings_->Get<json>("plugins");
+    std::vector<std::wstring> scripts;
+    for (const Plugin& p : plugins_)
+        if (state.is_object() && state.contains(p.id) && state[p.id].is_boolean() && state[p.id].get<bool>())
+            scripts.push_back(win::Widen(BuildPluginScript(p)));
+    if (views_) views_->SetPluginScripts(std::move(scripts));
 }
 
 void BrowserController::StartUpdateCheck(int tabId, const std::string& id, bool startup)
@@ -1408,6 +1541,13 @@ void BrowserController::OnNavigationCompleted(int tabId, bool success)
     if (!t) return;
     t->loading = false;
     ApplyZoom(tabId);
+    static bool firstLoad = true;
+    if (firstLoad && tabId == tabs_.ActiveId()) { firstLoad = false; Mark("first page loaded"); }
+    if (success && !t->isPrivate && settings_->Get<bool>("stayLoggedIn") && static_cast<int64_t>(tick_) - lastCookieTick_ >= 20)
+    {
+        lastCookieTick_ = static_cast<int64_t>(tick_);
+        views_->PersistSessionCookies();
+    }
     const std::string scheme = SchemeOf(t->url);
     if (success && !t->isPrivate && (scheme == "http" || scheme == "https"))
     {

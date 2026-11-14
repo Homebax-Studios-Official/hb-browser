@@ -67,13 +67,15 @@ If no dedicated security reporting email is available, use the project's officia
 ---
 
 Copyright (c) 2026 Homebax Studios.
-## Version 2.5.0 – security overview
+## Version 3.1.0 – security overview
 - Strict validation of settings, bookmarks, restored sessions and update links; session data is written atomically.
 - Site permissions (camera, microphone, location, notifications ...) are denied unless you allow them in a native prompt; decisions can be reset in Settings.
 - Navigation to unusual schemes is blocked; internal pages cannot be framed and run with a restrictive content policy.
 - Programs and scripts are never launched from the downloads list; insecure (http) downloads of programs can be blocked.
 - HTTPS-first upgrades, tracking prevention, certificate errors are never bypassed automatically.
 - The executable is built with ASLR, DEP and control-flow guard; DLL loading is restricted to system and application folders.
+- Plugins are limited to the sites they declare, can never touch internal pages, are validated (paths, sizes, file types) and need your explicit confirmation to install.
+- Saved passwords stay in the operating system's protected store (Windows engine store, Android system autofill); nothing is kept in plain text by HB Browser.
 - Update information is fetched over HTTPS; only an https update page is ever opened automatically.
 
 No software is 100% secure. Keep the WebView2 runtime up to date, only install files you trust, and report problems privately to the Homebax Studios contact.

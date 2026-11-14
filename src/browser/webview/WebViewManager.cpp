@@ -1,5 +1,6 @@
 #include "WebViewManager.h"
 
+#include <ctime>
 #include <fstream>
 #include <vector>
 
@@ -7,6 +8,7 @@
 
 #include "../core/Log.h"
 #include "../core/Navigation.h"
+#include "../core/SplitLayout.h"
 #include "../core/Util.h"
 #include "../../../platform/windows/WinUtil.h"
 
@@ -60,7 +62,7 @@ void WebViewManager::Initialize(const std::wstring& language, bool lite)
     if (!language.empty()) options->put_Language(language.c_str());
     {
         // HTTPS-first upgrades typed http addresses (with fallback); occlusion tracking costs CPU for nothing in a single window.
-        std::wstring args = L"--enable-features=HttpsUpgrades --disable-features=CalculateNativeWinOcclusion";
+        std::wstring args = L"--enable-features=HttpsUpgrades --disable-features=CalculateNativeWinOcclusion --process-per-site";
         if (lite) args += L" --renderer-process-limit=4 --disable-smooth-scrolling --disable-low-res-tiling";
         options->put_AdditionalBrowserArguments(args.c_str());
     }
@@ -158,8 +160,8 @@ void WebViewManager::CreateTab(int id, const std::wstring& url, bool isPrivate, 
         View& view = views_[id] = std::move(v);
 
         SetupCommon(id, view, false);
-        view.controller->put_Bounds(contentBounds_);
-        view.controller->put_IsVisible(id == activeId_);
+        ApplyLayout();
+        ApplyPlugins(id);
 
         if (adopt)
         {
@@ -206,8 +208,9 @@ void WebViewManager::ApplySettings(View& v, bool isUi)
 #endif
     if (auto s4 = st.try_query<ICoreWebView2Settings4>())
     {
-        s4->put_IsPasswordAutosaveEnabled(!isUi && options_.passwordAutosave);
-        s4->put_IsGeneralAutofillEnabled(!isUi && options_.autofill);
+        // Saved passwords/autofill use the engine's OS-protected store; never in private tabs.
+        s4->put_IsPasswordAutosaveEnabled(!isUi && !v.isPrivate && options_.passwordAutosave);
+        s4->put_IsGeneralAutofillEnabled(!isUi && !v.isPrivate && options_.autofill);
     }
 }
 
@@ -321,7 +324,7 @@ void WebViewManager::SetupCommon(int id, View& v, bool isUi)
 
     wv->add_NavigationStarting(
         Callback<ICoreWebView2NavigationStartingEventHandler>(
-            [this, id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* a) -> HRESULT
+            [this, id](ICoreWebView2* sender, ICoreWebView2NavigationStartingEventArgs* a) -> HRESULT
             {
                 wil::unique_cotaskmem_string uri;
                 a->get_Uri(uri.put());
@@ -332,6 +335,16 @@ void WebViewManager::SetupCommon(int id, View& v, bool isUi)
                 {
                     a->put_Cancel(TRUE);
                     return S_OK;
+                }
+                if (options_.cleanUrls && user)
+                {
+                    const std::string cleaned = StripTrackingParams(target);
+                    if (cleaned != target)
+                    {
+                        a->put_Cancel(TRUE);
+                        sender->Navigate(win::Widen(cleaned).c_str());
+                        return S_OK;
+                    }
                 }
                 sink_.OnNavigationStarting(id, target);
                 return S_OK;
@@ -520,11 +533,91 @@ void WebViewManager::ResumeIfSuspended(View& v)
 void WebViewManager::ShowTab(int id)
 {
     activeId_ = id;
+    ApplyLayout();
+}
+
+void WebViewManager::ApplyLayout()
+{
+    const bool split = splitId_ != 0 && splitId_ != activeId_ && views_.count(splitId_) && views_.count(activeId_);
+    SplitResult sr;
+    if (split)
+        sr = ComputeSplit({contentBounds_.left, contentBounds_.top, contentBounds_.right - contentBounds_.left,
+                           contentBounds_.bottom - contentBounds_.top}, splitRatio_, splitSide_, 6);
+    auto toRect = [](const SplitRect& r) { return RECT{r.x, r.y, r.x + r.w, r.y + r.h}; };
     for (auto& [vid, v] : views_)
     {
-        const bool visible = vid == id;
+        RECT r = contentBounds_;
+        bool visible = vid == activeId_;
+        if (split && vid == activeId_) r = toRect(sr.first);
+        if (split && vid == splitId_) { r = toRect(sr.second); visible = true; }
+        v.controller->put_Bounds(r);
         if (visible) ResumeIfSuspended(v);
         v.controller->put_IsVisible(visible);
+    }
+}
+
+void WebViewManager::SetSplit(int secondId, double ratio, bool sideBySide)
+{
+    splitId_ = secondId;
+    splitRatio_ = ClampSplitRatio(ratio);
+    splitSide_ = sideBySide;
+    ApplyLayout();
+}
+
+void WebViewManager::ApplyPlugins(int id)
+{
+    auto it = views_.find(id);
+    if (it == views_.end()) return;
+    for (const auto& old : it->second.pluginIds) it->second.webView->RemoveScriptToExecuteOnDocumentCreated(old.c_str());
+    it->second.pluginIds.clear();
+    for (const auto& script : pluginScripts_)
+        it->second.webView->AddScriptToExecuteOnDocumentCreated(
+            script.c_str(),
+            Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
+                [this, id](HRESULT hr, PCWSTR scriptId) -> HRESULT
+                {
+                    auto v = views_.find(id);
+                    if (SUCCEEDED(hr) && scriptId && v != views_.end()) v->second.pluginIds.emplace_back(scriptId);
+                    return S_OK;
+                }).Get());
+}
+
+void WebViewManager::SetPluginScripts(std::vector<std::wstring> scripts)
+{
+    pluginScripts_ = std::move(scripts);
+    for (auto& [id, v] : views_) ApplyPlugins(id);
+}
+
+void WebViewManager::PersistSessionCookies()
+{
+    for (auto& [id, v] : views_)
+    {
+        if (v.isPrivate) continue;
+        auto w2 = v.webView.try_query<ICoreWebView2_2>();
+        wil::com_ptr<ICoreWebView2CookieManager> cm;
+        if (!w2 || FAILED(w2->get_CookieManager(cm.put())) || !cm) continue;
+        cm->GetCookies(L"", Callback<ICoreWebView2GetCookiesCompletedHandler>(
+            [cm](HRESULT hr, ICoreWebView2CookieList* list) -> HRESULT
+            {
+                if (FAILED(hr) || !list) return S_OK;
+                UINT count = 0;
+                list->get_Count(&count);
+                const double expires = static_cast<double>(time(nullptr)) + 30.0 * 86400.0;
+                for (UINT i = 0; i < count && i < 2000; ++i)
+                {
+                    wil::com_ptr<ICoreWebView2Cookie> c;
+                    if (FAILED(list->GetValueAtIndex(i, c.put())) || !c) continue;
+                    BOOL session = FALSE, secure = FALSE;
+                    c->get_IsSession(&session);
+                    c->get_IsSecure(&secure);
+                    if (!session || !secure) continue;  // only secure cookies are ever kept
+                    wil::com_ptr<ICoreWebView2Cookie> copy;
+                    if (SUCCEEDED(cm->CopyCookie(c.get(), copy.put())) && copy && SUCCEEDED(copy->put_Expires(expires)))
+                        cm->AddOrUpdateCookie(copy.get());
+                }
+                return S_OK;
+            }).Get());
+        return;  // all non-private tabs share one cookie jar
     }
 }
 
@@ -645,7 +738,7 @@ void WebViewManager::FocusUi()
 void WebViewManager::SetContentBounds(const RECT& r)
 {
     contentBounds_ = r;
-    for (auto& [id, v] : views_) v.controller->put_Bounds(r);
+    ApplyLayout();
 }
 
 void WebViewManager::SetUiBounds(const RECT& r)
@@ -678,7 +771,7 @@ void WebViewManager::SetMuted(int id, bool muted)
 void WebViewManager::Suspend(int id)
 {
     auto it = views_.find(id);
-    if (it == views_.end() || id == activeId_ || it->second.suspended) return;
+    if (it == views_.end() || id == activeId_ || id == splitId_ || it->second.suspended) return;
     auto w3 = it->second.webView.try_query<ICoreWebView2_3>();
     if (!w3) return;
     it->second.controller->put_IsVisible(FALSE);

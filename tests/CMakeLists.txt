@@ -12,9 +12,10 @@ if(NOT JSON_INCLUDE_DIR)
     message(FATAL_ERROR "nlohmann/json.hpp not found (thirdparty/nlohmann-json or -DJSON_INCLUDE_DIR=...)")
 endif()
 
+add_compile_definitions(HB_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_executable(core_test core_test.cpp
     ${CORE}/core/Util.cpp ${CORE}/core/Navigation.cpp ${CORE}/core/Settings.cpp
-    ${CORE}/core/Storage.cpp ${CORE}/core/TabManager.cpp ${CORE}/core/Security.cpp)
+    ${CORE}/core/Storage.cpp ${CORE}/core/TabManager.cpp ${CORE}/core/Security.cpp ${CORE}/core/Plugins.cpp)
 target_include_directories(core_test PRIVATE ${CORE} ${JSON_INCLUDE_DIR})
 
 if(EXISTS ${TP}/sqlite/sqlite3.c)

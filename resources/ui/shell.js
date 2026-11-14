@@ -284,7 +284,8 @@
     ['bookmark', 'm_bookmarks', '', 'openPage', { name: 'bookmarks' }], ['history', 'm_history', 'Ctrl+H', 'openPage', { name: 'history' }],
     ['download', 'm_downloads', 'Ctrl+J', 'openPage', { name: 'downloads' }], '-', 'ZOOM',
     ['search', 'm_find', 'Ctrl+F', 'openFind'], ['print', 'm_print', 'Ctrl+P', 'print'], ['file', 'm_savePdf', '', 'savePdf'], ['window', 'm_screenshot', '', 'screenshot'],
-    ['file', 'm_reader', '', 'reader'], ['sun', 'm_night', '', 'pageNight'], ['code', 'm_devtools', 'F12', 'devtools'],
+    ['file', 'm_reader', '', 'reader'], ['sun', 'm_night', '', 'pageNight'], ['window', 'm_split', '', 'split'], ['window', 'm_split30', '', 'splitRatio', { ratio: 0.3 }], ['window', 'm_split50', '', 'splitRatio', { ratio: 0.5 }], ['window', 'm_split70', '', 'splitRatio', { ratio: 0.7 }],
+    ['window', 'm_splitSwap', '', 'splitSwap'], ['window', 'm_splitRotate', '', 'splitRotate'], ['code', 'm_plugins', '', 'openPage', { name: 'plugins' }], ['code', 'm_devtools', 'F12', 'devtools'],
     ['file', 'm_viewSource', 'Ctrl+U', 'viewSource'], '-',
     ['sliders', 'm_settings', 'Ctrl+,', 'openPage', { name: 'settings' }], ['info', 'm_about', '', 'openPage', { name: 'about' }], ['power', 'm_exit', '', 'exit'],
   ];
@@ -395,8 +396,10 @@
   hb.on('toast', (m) => toast(m.key));
   hb.on('dismiss', () => closePopups(null, true));
 
+  // Tell native we are ready first (tabs are already being created); translations arrive a moment later.
+  post('ready');
   (async () => {
     await loadLang('auto'); hydrateIcons();
-    post('ready');
+    if (state.activeId !== -1) renderAll();
   })();
 })();

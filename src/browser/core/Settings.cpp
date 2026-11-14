@@ -26,11 +26,14 @@ json Settings::Defaults()
         {"sleepAfterMinutes", 15},
         {"defaultZoom", 100},
         {"trackingPrevention", "balanced"},  // off | basic | balanced | strict
-        {"passwordAutosave", false},
-        {"generalAutofill", false},
+        {"passwordAutosave", true},
+        {"generalAutofill", true},
         {"devTools", true},
         {"customSearchEngines", json::array()},  // [{id:"custom-x", name, url with one %s}]
         {"clearOnExit", false},
+        {"cleanUrls", true},                  // strip tracking parameters from links you open
+        {"stayLoggedIn", true},               // keep "session" logins across restarts (cookies are kept 30 days)
+        {"plugins", json::object()},          // {id: enabled}
         {"checkUpdates", true},               // look for a new version at every start and open its page
         {"liteMode", "auto"},                 // auto | on | off  (fewer processes, less memory; applied at next start)
         {"blockInsecureDownloads", true},     // refuse programs/scripts downloaded over plain http
@@ -126,6 +129,13 @@ bool Settings::IsValid(const std::string& key, const json& v)
         if (!v.is_object() || v.size() > 2000) return false;
         for (auto it = v.begin(); it != v.end(); ++it)
             if (!it.value().is_number() || it.key().size() > 255) return false;
+        return true;
+    }
+    if (key == "plugins")
+    {
+        if (!v.is_object() || v.size() > 64) return false;
+        for (auto it = v.begin(); it != v.end(); ++it)
+            if (!it.value().is_boolean() || !IsIdent(it.key(), 40)) return false;
         return true;
     }
     if (key == "liteMode") return OneOf(v, {"auto", "on", "off"});

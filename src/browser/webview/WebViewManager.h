@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <unordered_set>
 
 namespace hb {
@@ -54,6 +55,7 @@ struct ViewOptions
     bool passwordAutosave = false;
     bool autofill = false;
     bool devTools = true;
+    bool cleanUrls = true;     // strip tracking parameters from user-initiated navigations
 };
 
 struct NewWindowAdopt
@@ -103,6 +105,12 @@ public:
     void FocusUi();
 
     void SetContentBounds(const RECT& r);
+    // Split view: the active tab fills the first pane, `secondId` the second (0 = no split).
+    void SetSplit(int secondId, double ratio, bool sideBySide);
+    // Plugin scripts are injected into every page at document start (they match the address themselves).
+    void SetPluginScripts(std::vector<std::wstring> scripts);
+    // Turns "session" cookies of secure sites into 30-day cookies so logins survive a restart.
+    void PersistSessionCookies();
     void SetUiBounds(const RECT& r);
     void SetUiBackground(COLORREF color);
     void SetOptions(const ViewOptions& options);
@@ -124,7 +132,14 @@ private:
         wil::com_ptr<ICoreWebView2> webView;
         bool isPrivate = false;
         bool suspended = false;
+        std::vector<std::wstring> pluginIds;
     };
+    void ApplyLayout();
+    void ApplyPlugins(int id);
+    int splitId_ = 0;
+    double splitRatio_ = 0.5;
+    bool splitSide_ = true;
+    std::vector<std::wstring> pluginScripts_;
 
     void CreateController(HWND host, bool isPrivate, std::function<void(ICoreWebView2Controller*)> done);
     void SetupCommon(int id, View& v, bool isUi);

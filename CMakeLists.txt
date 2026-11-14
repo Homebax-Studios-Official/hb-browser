@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(HBBrowser VERSION 2.5.0 LANGUAGES C CXX)
+project(HBBrowser VERSION 3.1.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "HB Browser (WebView2) is a Windows application. Other platforms will get their own front-end under platform/.")
@@ -77,6 +77,7 @@ add_executable(HBBrowser WIN32
     src/browser/core/Storage.cpp
     src/browser/core/TabManager.cpp
     src/browser/core/Security.cpp
+    src/browser/core/Plugins.cpp
     platform/windows/WinUtil.cpp
     "${CMAKE_BINARY_DIR}/HBBrowser.rc"
 )

@@ -1,10 +1,13 @@
 #include "core/Navigation.h"
 #include "core/Settings.h"
 #include "core/Security.h"
+#include "core/Plugins.h"
+#include "core/SplitLayout.h"
 #include "core/Storage.h"
 #include "core/TabManager.h"
 #include "core/Util.h"
 #include <cstdio>
+#include <fstream>
 #include <cstdlib>
 #include <filesystem>
 using namespace hb;
@@ -29,6 +32,27 @@ int main() {
   EQ(SchemeOf("HTTPS://x"), "https");
   CHECK(CompareVersions("2.1.10","2.1.2") > 0); CHECK(CompareVersions("2.1.2","2.1.2")==0); CHECK(CompareVersions("2.0","2.0.1") < 0); CHECK(CompareVersions("v3","2.9.9")>0);
 
+  // split view, plugins, tracking params
+  { auto r = ComputeSplit({0, 0, 1000, 500}, 0.5, true, 4); CHECK(r.first.w == 498 && r.second.x == 502 && r.second.w == 498 && r.first.h == 500); }
+  { auto r = ComputeSplit({10, 20, 100, 100}, 0.99, false, 0); CHECK(r.first.h == 80 && r.second.y == 100 && r.second.h == 20); }
+  EQ(StripTrackingParams("https://a.cz/p?utm_source=x&id=7&fbclid=Z#h"), "https://a.cz/p?id=7#h");
+  EQ(StripTrackingParams("https://a.cz/p?UTM_medium=x"), "https://a.cz/p"); EQ(StripTrackingParams("ftp://a.cz/p?utm_x=1"), "ftp://a.cz/p?utm_x=1");
+  EQ(StripTrackingParams("https://a.cz/p?q=utm_cat"), "https://a.cz/p?q=utm_cat");
+  {
+    std::ifstream vf(std::string(HB_TEST_DIR) + "/match_vectors.json"); auto vec = json::parse(vf);
+    for (auto& v : vec) CHECK(MatchPattern(v[0].get<std::string>(), v[1].get<std::string>()) == v[2].get<bool>());
+    CHECK(!IsValidMatchPattern("file:///*")); CHECK(!IsValidMatchPattern("https://hb.local/*")); CHECK(!IsValidMatchPattern("https://a*b.com/*")); CHECK(!IsValidMatchPattern("https://a.com"));
+    auto root = std::filesystem::temp_directory_path() / "hb_plugin_test"; std::filesystem::remove_all(root);
+    auto src = root / "src"; std::filesystem::create_directories(src);
+    { std::ofstream(src / "manifest.json") << R"({"name":"Dark Mode!","version":"1.0","content_scripts":[{"matches":["https://*.example.com/*"],"js":["a.js"],"css":["a.css"],"run_at":"document_start"}]})"; std::ofstream(src / "a.js") << "window.__x=1;"; std::ofstream(src / "a.css") << "body{color:red}"; std::ofstream(src / "evil.exe") << "MZ"; }
+    Plugin p; std::string err;
+    CHECK(InstallPlugin(src, root / "plugins", p, err)); EQ(p.id, "dark-mode"); CHECK(!p.allSites); CHECK(!std::filesystem::exists(root / "plugins" / "dark-mode" / "evil.exe"));
+    CHECK(LoadPlugins(root / "plugins").size() == 1); auto js = BuildPluginScript(p); CHECK(js.find("window.__x=1;") != std::string::npos && js.find("body{color:red}") != std::string::npos);
+    { std::ofstream o(root / "script.js"); o << std::string("var M_=") + "0;\n" + js + "\n"; }
+    std::ofstream(src / "manifest.json", std::ios::trunc) << R"({"name":"X","version":"1","content_scripts":[{"matches":["<all_urls>"],"js":["../a.js"]}]})";
+    CHECK(!ParsePlugin(src, p, err)); std::ofstream(src / "manifest.json", std::ios::trunc) << R"({"name":"X","version":"1","content_scripts":[{"matches":["<all_urls>"],"js":["a.js"]}]})";
+    CHECK(ParsePlugin(src, p, err) && p.allSites); CHECK(RemovePlugin(root / "plugins", "dark-mode")); CHECK(!RemovePlugin(root / "plugins", "../x")); std::filesystem::remove_all(root);
+  }
   // security / validation
   EQ(ResolveInput("edge://settings", "google"), "https://www.google.com/search?q=edge%3A%2F%2Fsettings");
   CHECK(IsSafeTabUrl("https://a.cz")); CHECK(!IsSafeTabUrl("javascript:alert(1)")); CHECK(!IsSafeTabUrl("data:text/html,x")); CHECK(IsSafeTabUrl("about:blank")); CHECK(!IsSafeTabUrl("about:config"));

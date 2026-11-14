@@ -70,6 +70,32 @@ bool IsAllowedNavigation(const std::string& url, bool userInitiated)
     return scheme == "data" && userInitiated;
 }
 
+std::string StripTrackingParams(const std::string& url)
+{
+    const std::string scheme = SchemeOf(url);
+    if (scheme != "http" && scheme != "https") return url;
+    const auto q = url.find('?');
+    if (q == std::string::npos) return url;
+    const auto hash = url.find('#', q);
+    const std::string query = url.substr(q + 1, hash == std::string::npos ? std::string::npos : hash - q - 1);
+    static const char* exact[] = {"fbclid", "gclid", "gbraid", "wbraid", "dclid", "msclkid", "mc_eid", "mc_cid", "igshid", "yclid",
+                                  "twclid", "ttclid", "_ga", "_gl", "_hsenc", "_hsmi", "vero_id", "oly_enc_id", "oly_anon_id"};
+    std::string kept;
+    size_t pos = 0;
+    while (pos <= query.size())
+    {
+        const auto amp = query.find('&', pos);
+        const std::string part = query.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
+        const std::string key = ToLower(part.substr(0, part.find('=')));
+        bool tracking = key.rfind("utm_", 0) == 0;
+        for (const char* e : exact) tracking = tracking || key == e;
+        if (!part.empty() && !tracking) kept += (kept.empty() ? "" : "&") + part;
+        if (amp == std::string::npos) break;
+        pos = amp + 1;
+    }
+    return url.substr(0, q) + (kept.empty() ? "" : "?" + kept) + (hash == std::string::npos ? "" : url.substr(hash));
+}
+
 bool IsSafeTabUrl(const std::string& url)
 {
     const std::string scheme = SchemeOf(url);

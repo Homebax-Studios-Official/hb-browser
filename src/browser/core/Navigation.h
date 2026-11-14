@@ -23,6 +23,9 @@ bool IsSafeTabUrl(const std::string& url);
 // Top-level navigations a tab may perform. Everything else (ms-*, vbscript, unknown schemes ...) is cancelled;
 // data: only when the user triggered it.
 bool IsAllowedNavigation(const std::string& url, bool userInitiated);
+
+// Removes well-known tracking parameters (utm_*, fbclid, gclid ...) from an http(s) URL; other URLs are returned unchanged.
+std::string StripTrackingParams(const std::string& url);
 std::string SearchUrl(const std::string& engineId, const std::string& query);
 
 // Turns whatever the user typed into the address bar into a loadable URL.

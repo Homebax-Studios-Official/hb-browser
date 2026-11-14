@@ -1,0 +1,18 @@
+[
+ ["https://*.example.com/*", "https://example.com/", true],
+ ["https://*.example.com/*", "https://a.b.example.com/x?y=1", true],
+ ["https://*.example.com/*", "https://evilexample.com/", false],
+ ["https://*.example.com/*", "http://example.com/", false],
+ ["*://example.com/a/*", "http://example.com/a/b", true],
+ ["*://example.com/a/*", "https://example.com/b/a/", false],
+ ["https://example.com/*", "https://user:pw@evil.com@example.com/", true],
+ ["https://example.com/*", "https://example.com@evil.com/", false],
+ ["https://example.com/*", "https://example.com:8443/x", true],
+ ["<all_urls>", "https://anything.org/p", true],
+ ["<all_urls>", "https://hb.local/pages/settings.html", false],
+ ["*://*/*", "file:///etc/passwd", false],
+ ["https://example.com/*", "https://example.com/p#frag", true],
+ ["https://example.com/a*b", "https://example.com/aXXb", true],
+ ["https://example.com/a*b", "https://example.com/aXXc", false],
+ ["https://example.com/?q=*", "https://example.com?q=1", true]
+]

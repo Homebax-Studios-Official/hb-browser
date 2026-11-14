@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "../BrowserWindow.h"
+#include "../core/Plugins.h"
 #include "../core/Settings.h"
 #include "../core/Storage.h"
 #include "../core/TabManager.h"
@@ -117,6 +118,7 @@ private:
     std::string LanguageTag() const;
     void StartUpdateCheck(int tabId, const std::string& id, bool startup);
     nlohmann::json BuildInfo();
+    void ReloadPlugins();
     nlohmann::json Dictionary(const std::string& lang);
     std::filesystem::path DownloadDir() const;
     std::string SecurityOf(const Tab& t) const;
@@ -134,6 +136,11 @@ private:
 
     bool uiReady_ = false;
     bool updateSiteShown_ = false;
+    std::vector<Plugin> plugins_;
+    int splitId_ = 0;            // second pane of the split view (0 = none)
+    double splitRatio_ = 0.5;
+    bool splitSide_ = true;
+    int64_t lastCookieTick_ = -100;
     std::map<std::string, nlohmann::json> dictCache_;
     bool envReady_ = false;
     bool dark_ = false;
