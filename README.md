@@ -1,7 +1,7 @@
 # HB Browser
 
 <p align="center">
-  <img src="https://homebax.vercel.app/hb-browser-banner.png" alt="HB Browser Banner" width="100%">
+  <img src="assets/hb-browser-banner.png" alt="HB Browser Banner" width="100%">
 </p>
 
 <h1 align="center">HB Browser</h1>
